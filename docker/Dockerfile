@@ -15,8 +15,8 @@ RUN apk add --update --no-cache py3-pip ttf-liberation && \
     python3 -m pip install --break-system-packages --no-cache /usr/local/src/cleanvid && \
     rm -rf /usr/local/src/cleanvid
     
-COPY --from=mwader/static-ffmpeg:6.0 /ffmpeg /usr/local/bin/
-COPY --from=mwader/static-ffmpeg:6.0 /ffprobe /usr/local/bin/
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffmpeg /usr/local/bin/
+COPY --from=mwader/static-ffmpeg:7.1.1 /ffprobe /usr/local/bin/
 
 ENTRYPOINT ["cleanvid"]
 CMD []
