@@ -81,5 +81,3 @@ sudo docker run --rm --gpus all \
 This script is part of the [cleanvid](https://github.com/mmguero/cleanvid) project and follows the BSD 3-Clause License.
 
 ---
-
-Let me know if you want to add flags for `--embed-subs`, `--burn`, or subtitle mapping. You’ve now got a turnkey launcher that’s GPU-aware, user-friendly, and ready for public use.
