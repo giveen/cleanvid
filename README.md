@@ -1,124 +1,174 @@
-# cleanvid
+# 🧼 cleanvid
 
 [![Latest Version](https://img.shields.io/pypi/v/cleanvid)](https://pypi.python.org/pypi/cleanvid/) [![Docker Image](https://github.com/mmguero/cleanvid/workflows/cleanvid-build-push-ghcr/badge.svg)](https://github.com/mmguero/cleanvid/pkgs/container/cleanvid)
 
-**cleanvid** is a little script to mute profanity in video files in a few simple steps:
+**cleanvid** is a script to mute profanity in video files using subtitle-based detection and audio stream editing. It works in four steps:
 
-1. The user provides as input a video file and matching `.srt` subtitle file. If subtitles are not provided explicitly, they will be extracted from the video file if possible; if not, [`subliminal`](https://github.com/Diaoul/subliminal) is used to attempt to download the best matching `.srt` file.
-2. [`pysrt`](https://github.com/byroot/pysrt) is used to parse the `.srt` file, and each entry is checked against a [list](./src/cleanvid/swears.txt) of profanity or other words or phrases you'd like muted. Mappings can be provided (eg., map "sh*t" to "poop"), otherwise the word will be replaced with *****.
-3. A new "clean" `.srt` file is created. with *only* those phrases containing the censored/replaced objectional language.
-4. [`ffmpeg`](https://www.ffmpeg.org/) is used to create a cleaned video file. This file contains the original video stream, but the specified audio stream is muted during the segments containing objectional language. That audio stream is re-encoded and remultiplexed back together with the video. Optionally, the clean `.srt` file can be embedded in the cleaned video file as a subtitle track.
+1. You provide a video file and matching `.srt` subtitle file. If subtitles aren’t provided, cleanvid will extract them or use [`subliminal`](https://github.com/Diaoul/subliminal) to download the best match.
+2. [`pysrt`](https://github.com/byroot/pysrt) parses the `.srt` file and checks each entry against a [list](./src/cleanvid/swears.txt) of objectionable words. You can provide mappings (e.g., "sh*t" → "poop") or let cleanvid replace them with `*****`.
+3. A new "clean" `.srt` file is created with only the censored phrases.
+4. [`ffmpeg`](https://www.ffmpeg.org/) is used to mute the audio stream during those segments. The cleaned audio is re-encoded and remuxed with the original video. Optionally, the clean `.srt` file can be embedded as a subtitle track.
 
-You can then use your favorite media player to play the cleaned video file together with the cleaned subtitles.
+You can then play the cleaned video with your favorite media player.
 
-As an alternative to creating a new video file, cleanvid can create a simple EDL file (see the [mplayer](http://www.mplayerhq.hu/DOCS/HTML/en/edl.html) or KODI [documentation](https://kodi.wiki/view/Edit_decision_list)) or a custom JSON definition file for [PlexAutoSkip](https://github.com/mdhiggins/PlexAutoSkip).
+As an alternative to creating a new video file, cleanvid can generate:
+- An [EDL file](http://www.mplayerhq.hu/DOCS/HTML/en/edl.html) for MPlayer or Kodi
+- A JSON definition file for [PlexAutoSkip](https://github.com/mdhiggins/PlexAutoSkip)
 
-**cleanvid** is part of a family of projects with similar goals:
+**cleanvid** is part of a family of censorship tools:
 
-* 📼 [cleanvid](https://github.com/mmguero/cleanvid) for video files (using [SRT-formatted](https://en.wikipedia.org/wiki/SubRip#Format) subtitles)
-* 🎤 [monkeyplug](https://github.com/mmguero/monkeyplug) for audio and video files (using either [Whisper](https://openai.com/research/whisper) or the [Vosk](https://alphacephei.com/vosk/)-[API](https://github.com/alphacep/vosk-api) for speech recognition)
+* 📼 [cleanvid](https://github.com/mmguero/cleanvid) for video files
+* 🎤 [monkeyplug](https://github.com/mmguero/monkeyplug) for audio/video using Whisper or Vosk
 * 📕 [montag](https://github.com/mmguero/montag) for ebooks
-## Installation
 
-Using `pip`, to install the latest [release from PyPI](https://pypi.org/project/cleanvid/):
+---
 
-```
+## 📦 Installation
+
+Install the latest release from PyPI:
+
+```bash
 python3 -m pip install -U cleanvid
 ```
 
-Or to install directly from GitHub:
+Or install directly from GitHub:
 
-
-```
+```bash
 python3 -m pip install -U 'git+https://github.com/mmguero/cleanvid'
 ```
 
-## Prerequisites
+---
 
-[cleanvid](./src/cleanvid/cleanvid.py) requires:
+## 🔧 Prerequisites
 
-* Python 3
-* [FFmpeg](https://www.ffmpeg.org)
-* [babelfish](https://github.com/Diaoul/babelfish)
-* [delegator.py](https://github.com/kennethreitz/delegator.py)
-* [pysrt](https://github.com/byroot/pysrt)
-* [subliminal](https://github.com/Diaoul/subliminal)
+cleanvid requires:
 
-To install FFmpeg, use your operating system's package manager or install binaries from [ffmpeg.org](https://www.ffmpeg.org/download.html). The Python dependencies will be installed automatically if you are using `pip` to install cleanvid.
+- Python 3
+- [FFmpeg](https://www.ffmpeg.org)
+- [babelfish](https://github.com/Diaoul/babelfish)
+- [delegator.py](https://github.com/kennethreitz/delegator.py)
+- [pysrt](https://github.com/byroot/pysrt)
+- [subliminal](https://github.com/Diaoul/subliminal)
 
-## usage
+Install FFmpeg via your OS package manager or from [ffmpeg.org](https://www.ffmpeg.org/download.html). Python dependencies are installed automatically via `pip`.
 
-```
-usage: cleanvid [-h] [-s <srt>] -i <input video> [-o <output video>] [--plex-auto-skip-json <output JSON>] [--plex-auto-skip-id <content identifier>] [--subs-output <output srt>]
-                [-w <profanity file>] [-l <language>] [-p <int>] [-e] [-f] [--subs-only] [--offline] [--edl] [--json] [--re-encode-video] [--re-encode-audio] [-b] [-v VPARAMS] [-a APARAMS]
-                [-d] [--audio-stream-index <int>] [--audio-stream-list] [--threads-input <int>] [--threads-encoding <int>] [--threads <int>]
+---
 
-options:
-  -h, --help            show this help message and exit
-  -s <srt>, --subs <srt>
-                        .srt subtitle file (will attempt auto-download if unspecified and not --offline)
-  -i <input video>, --input <input video>
-                        input video file
-  -o <output video>, --output <output video>
-                        output video file
-  --plex-auto-skip-json <output JSON>
-                        custom JSON file for PlexAutoSkip (also implies --subs-only)
-  --plex-auto-skip-id <content identifier>
-                        content identifier for PlexAutoSkip (also implies --subs-only)
-  --subs-output <output srt>
-                        output subtitle file
-  -w <profanity file>, --swears <profanity file>
-                        text file containing profanity (with optional mapping)
-  -l <language>, --lang <language>
-                        language for extracting srt from video file or srt download (default is "eng")
-  -p <int>, --pad <int>
-                        pad (seconds) around profanity
-  -e, --embed-subs      embed subtitles in resulting video file
-  -f, --full-subs       include all subtitles in output subtitle file (not just scrubbed)
-  --subs-only           only operate on subtitles (do not alter audio)
-  --offline             don't attempt to download subtitles
-  --edl                 generate MPlayer EDL file with mute actions (also implies --subs-only)
-  --json                generate JSON file with muted subtitles and their contents
-  --re-encode-video     Re-encode video
-  --re-encode-audio     Re-encode audio
-  -b, --burn            Hard-coded subtitles (implies re-encode)
-  -v VPARAMS, --video-params VPARAMS
-                        Video parameters for ffmpeg (only if re-encoding)
-  -a APARAMS, --audio-params APARAMS
-                        Audio parameters for ffmpeg
-  -d, --downmix         Downmix to stereo (if not already stereo)
-  --audio-stream-index <int>
-                        Index of audio stream to process
-  --audio-stream-list   Show list of audio streams (to get index for --audio-stream-index)
-  --threads-input <int>
-                        ffmpeg global options -threads value
-  --threads-encoding <int>
-                        ffmpeg encoding options -threads value
-  --threads <int>       ffmpeg -threads value (for both global options and encoding)
+## 🚀 Usage
+
+```bash
+cleanvid -i EXAMPLE.mp4 -s subs.srt -o output.mp4 --re-encode-audio
 ```
 
-### Docker
+For full options:
 
-Alternately, a [Dockerfile](./docker/Dockerfile) is provided to allow you to run cleanvid in Docker. You can build the `oci.guero.org/cleanvid:latest` Docker image with [`build_docker.sh`](./docker/build_docker.sh), then run [`cleanvid-docker.sh`](./docker/cleanvid-docker.sh) inside the directory where your video/subtitle files are located.
+```bash
+cleanvid --help
+```
 
-## Contributing
+See the full CLI reference above for all flags and modes.
 
-If you'd like to help improve cleanvid, pull requests will be welcomed!
+---
 
-## Authors
+## 🐳 Docker Support
 
-* **Seth Grover** - *Initial work* - [mmguero](https://github.com/mmguero)
+A [Dockerfile](./docker/Dockerfile) is provided to run cleanvid in a container. GPU acceleration is supported via NVIDIA NVENC.
 
-## License
+### 🔧 Build the Image
 
-This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
+```bash
+./docker/build_docker.sh
+```
 
-## Acknowledgments
+This builds a container with FFmpeg 8.0 and NVENC support.
+
+### 🚀 Run with GPU Acceleration
+
+To use NVIDIA GPU acceleration:
+
+1. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+2. Run with `--gpus all` and mount the required runtime libraries:
+
+```bash
+sudo docker run --rm --gpus all \
+  -v "$PWD:/videos" \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
+  --entrypoint ffmpeg \
+  oci.guero.org/cleanvid:gpu \
+  -y \
+  -i /videos/EXAMPLE.mp4 \
+  -c:v h264_nvenc -preset fast -crf 23 \
+  -an \
+  /videos/output.nvenc.mp4
+```
+
+> ⚠️ This command mounts the required NVIDIA runtime libraries (`libnvidia-encode.so.1`, `libnvcuvid.so.1`) from your host into the container. Without these, FFmpeg will not be able to access NVENC encoders and will silently fall back to CPU or fail.
+
+> ✅ You must have an NVIDIA GPU and driver version ≥ 570.0 installed on your host system.
+
+---
+
+### 🧪 Verify NVENC Availability
+
+```bash
+sudo docker run --rm --gpus all \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
+  --entrypoint ffmpeg \
+  oci.guero.org/cleanvid:gpu -encoders | grep nvenc
+```
+
+You should see:
+```
+V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+```
+
+---
+
+### 🛠️ Run Interactively (for debugging)
+
+```bash
+sudo docker run --rm -it --gpus all \
+  -v "$PWD:/videos" \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
+  --entrypoint /bin/bash \
+  oci.guero.org/cleanvid:gpu
+```
+
+Then run:
+
+```bash
+cleanvid -i EXAMPLE.mp4 --re-encode-video -o output.mp4
+```
+
+---
+
+## 🤝 Contributing
+
+Pull requests are welcome! If you’d like to help improve cleanvid, feel free to fork and submit changes.
+
+---
+
+## 👤 Author
+
+**Seth Grover** — [mmguero](https://github.com/mmguero)
+
+---
+
+## 📄 License
+
+BSD 3-Clause License — see [LICENSE](LICENSE)
+
+---
+
+## 🙏 Acknowledgments
 
 Thanks to:
 
-* the developers of [FFmpeg](https://www.ffmpeg.org/about.html)
-* [Mattias Wadman](https://github.com/wader) for his [ffmpeg](https://github.com/wader/static-ffmpeg) image
-* [delegator.py](https://github.com/kennethreitz/delegator.py) developer Kenneth Reitz and contributors
-* [pysrt](https://github.com/byroot/pysrt) developer Jean Boussier and contributors
-* [subliminal](https://github.com/Diaoul/subliminal) developer Antoine Bertin and contributors
+- [FFmpeg](https://www.ffmpeg.org/about.html)
+- [Mattias Wadman](https://github.com/wader) for his [static-ffmpeg](https://github.com/wader/static-ffmpeg) image
+- [delegator.py](https://github.com/kennethreitz/delegator.py) by Kenneth Reitz
+- [pysrt](https://github.com/byroot/pysrt) by Jean Boussier
+- [subliminal](https://github.com/Diaoul/subliminal) by Antoine Bertin
