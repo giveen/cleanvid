@@ -57,7 +57,7 @@ Install FFmpeg via your OS package manager or from [ffmpeg.org](https://www.ffmp
 ## 🚀 Usage
 
 ```bash
-cleanvid -i input.mp4 -s subs.srt -o output.mp4 --re-encode-audio
+cleanvid -i EXAMPLE.mp4 -s subs.srt -o output.mp4 --re-encode-audio
 ```
 
 For full options:
@@ -87,24 +87,34 @@ This builds a container with FFmpeg 8.0 and NVENC support.
 To use NVIDIA GPU acceleration:
 
 1. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-2. Run with `--runtime=nvidia`:
+2. Run with `--gpus all` and mount the required runtime libraries:
 
 ```bash
-sudo docker run --rm \
-  --runtime=nvidia \
+sudo docker run --rm --gpus all \
   -v "$PWD:/videos" \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
+  --entrypoint ffmpeg \
   oci.guero.org/cleanvid:gpu \
-  -i /videos/input.mp4 \
-  --re-encode-video \
-  -o /videos/output.mp4
+  -y \
+  -i /videos/EXAMPLE.mp4 \
+  -c:v h264_nvenc -preset fast -crf 23 \
+  -an \
+  /videos/output.nvenc.mp4
 ```
 
-> ⚠️ Requires NVIDIA driver version ≥ 570.0
+> ⚠️ This command mounts the required NVIDIA runtime libraries (`libnvidia-encode.so.1`, `libnvcuvid.so.1`) from your host into the container. Without these, FFmpeg will not be able to access NVENC encoders and will silently fall back to CPU or fail.
+
+> ✅ You must have an NVIDIA GPU and driver version ≥ 570.0 installed on your host system.
+
+---
 
 ### 🧪 Verify NVENC Availability
 
 ```bash
-sudo docker run --rm --runtime=nvidia \
+sudo docker run --rm --gpus all \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
   --entrypoint ffmpeg \
   oci.guero.org/cleanvid:gpu -encoders | grep nvenc
 ```
@@ -114,19 +124,23 @@ You should see:
 V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
 ```
 
+---
+
 ### 🛠️ Run Interactively (for debugging)
 
 ```bash
-sudo docker run --rm -it --runtime=nvidia \
-  --entrypoint /bin/bash \
+sudo docker run --rm -it --gpus all \
   -v "$PWD:/videos" \
-  -w /videos \
+  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
+  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
+  --entrypoint /bin/bash \
   oci.guero.org/cleanvid:gpu
 ```
 
 Then run:
+
 ```bash
-cleanvid -i input.mp4 --re-encode-video -o output.mp4
+cleanvid -i EXAMPLE.mp4 --re-encode-video -o output.mp4
 ```
 
 ---
