@@ -7,12 +7,12 @@ set -e
 set -o pipefail
 set -u
 
-# Check for GPU availability
-if ! $ENGINE run --rm --gpus all --entrypoint ffmpeg "$IMAGE" -encoders | grep -q h264_nvenc; then
-  echo "NVENC not available — falling back to CPU encoding"
+# Check for GPU availability and CUDA support
+if ! $ENGINE run --rm --gpus all --entrypoint ffmpeg "$IMAGE" -hwaccel cuda -hide_banner -loglevel error -f lavfi -i nullsrc=s=1280x720 -t 1 -y /dev/null 2>/dev/null; then
+  echo "CUDA not available — falling back to CPU encoding"
   GPU_ARGS=()
 else
-  echo "NVENC available — using GPU acceleration"
+  echo "CUDA available — using GPU acceleration"
   GPU_ARGS=(--gpus all)
 fi
 

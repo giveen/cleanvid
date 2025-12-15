@@ -10,6 +10,11 @@ shopt -s nullglob
 VIDEO_DIR="$(pwd)"
 VIDEO_FILES=("$VIDEO_DIR"/*.mp4 "$VIDEO_DIR"/*.mkv "$VIDEO_DIR"/*.avi)
 
+if [[ ${#VIDEO_FILES[@]} -eq 0 ]]; then
+    echo "❌ No video files found in $(pwd). Exiting."
+    exit 1
+fi
+
 # Prompt user to select a video file
 echo "🎬 Available video files:"
 select VIDEO in "${VIDEO_FILES[@]}"; do
@@ -37,14 +42,31 @@ else
   fi
 fi
 
-# Run cleanvid with GPU acceleration
-echo "🚀 Running cleanvid with GPU acceleration..."
-$ENGINE run --rm --gpus all \
-  -v "$VIDEO_DIR:/data" \
-  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
-  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
-  -w /data \
-  "$IMAGE" \
-  -i "$BASENAME" -s "$NAME.srt" --re-encode-video -o "${NAME}.clean.mp4"
+# Check for GPU availability and run with appropriate flags
+if $ENGINE run --rm --gpus all -it "$IMAGE" /usr/local/bin/cleanvid --help >/dev/null 2>&1; then
+  # Test actual FFmpeg hardware acceleration capability
+  if $ENGINE run --rm --gpus all "$IMAGE" /usr/local/bin/ffmpeg -hwaccel cuda -f lavfi -i nullsrc=s=1280x720 -t 1 -c:v h264_nvenc -y /dev/null >/dev/null 2>&1; then
+    echo "🚀 Running cleanvid with GPU acceleration..."
+    $ENGINE run --rm --gpus all \
+      -v "$VIDEO_DIR:/data" \
+      -w /data \
+      "$IMAGE" \
+      -i "$BASENAME" -s "$NAME.srt" --re-encode-video -o "${NAME}.clean.mp4"
+  else
+    echo "⚠️  CUDA not available — running with CPU encoding..."
+    $ENGINE run --rm \
+      -v "$VIDEO_DIR:/data" \
+      -w /data \
+      "$IMAGE" \
+      -i "$BASENAME" -s "$NAME.srt" --re-encode-video -o "${NAME}.clean.mp4"
+  fi
+else
+  echo "⚠️  CUDA not available — running with CPU encoding..."
+  $ENGINE run --rm \
+    -v "$VIDEO_DIR:/data" \
+    -w /data \
+    "$IMAGE" \
+    -i "$BASENAME" -s "$NAME.srt" --re-encode-video -o "${NAME}.clean.mp4"
+fi
 
 echo "✅ Output created: ${NAME}.clean.mp4"

@@ -43,14 +43,15 @@ RUN git clone https://git.ffmpeg.org/ffmpeg.git /ffmpeg && \
     make install && \
     ldconfig
 
+# Install Python dependencies
+RUN pip install pysrt delegator.py subliminal babelfish chardet
+
 # Install cleanvid
 ADD . /usr/local/src/cleanvid
 RUN python3 -m pip install /usr/local/src/cleanvid && \
     rm -rf /usr/local/src/cleanvid
 
-# Inject NVIDIA runtime libraries for NVENC support
-COPY libnvidia-encode.so.1 /usr/lib/x86_64-linux-gnu/
-COPY libnvcuvid.so.1 /usr/lib/x86_64-linux-gnu/
+# Remove the manual library copies since they're handled by nvidia-docker
 RUN ldconfig
 
 ENTRYPOINT ["cleanvid"]
