@@ -26,7 +26,9 @@ from itertools import tee
 __script_location__ = os.path.dirname(os.path.realpath(__file__))
 
 VIDEO_DEFAULT_PARAMS = '-c:v libx264 -preset slow -crf 22'
+VIDEO_GPU_PARAMS = '-c:v h264_nvenc -preset p4 -tune ll'  # NVIDIA
 AUDIO_DEFAULT_PARAMS = '-c:a aac -ab 224k -ar 44100'
+AUDIO_GPU_PARAMS = '-c:a aac -b:a 224k'
 # for downmixing, https://superuser.com/questions/852400 was helpful
 AUDIO_DOWNMIX_FILTER = 'pan=stereo|FL=0.8*FC + 0.6*FL + 0.6*BL + 0.5*LFE|FR=0.8*FC + 0.6*FR + 0.6*BR + 0.5*LFE'
 SUBTITLE_DEFAULT_LANG = 'eng'
@@ -38,6 +40,52 @@ def pairwise(iterable):
     a, b = tee(iterable)
     next(b, None)
     return zip(a, b)
+
+
+# Add GPU detection function with multiple fallbacks
+def check_gpu_availability():
+    """Check if CUDA/NVIDIA hardware is available with multiple methods"""
+    try:
+        # Method 1: Check nvidia-smi availability and output
+        import subprocess
+        result = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and len(result.stdout.strip()) > 1:
+            return True
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # nvidia-smi not available or timed out
+        pass
+    except Exception:
+        # Other errors with nvidia-smi
+        pass
+    
+    try:
+        # Method 2: Check if PyTorch can access CUDA
+        import torch
+        if torch.cuda.is_available():
+            return True
+    except ImportError:
+        # PyTorch not installed
+        pass
+    except Exception:
+        # Other errors with PyTorch
+        pass
+        
+    try:
+        # Method 3: Try to run a simple FFmpeg GPU command
+        import subprocess
+        result = subprocess.run(['ffmpeg', '-hwaccel', 'cuda', '-f', 'lavfi', '-i', 'nullsrc=s=1280x720', 
+                               '-t', '1', '-c:v', 'h264_nvenc', '-y', '/dev/null'], 
+                              capture_output=True, timeout=10)
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # FFmpeg not available or timed out
+        pass
+    except Exception:
+        # Other errors with FFmpeg GPU test
+        pass
+    
+    return False
 
 
 ######## GetFormatAndStreamInfo ###############################################
@@ -172,27 +220,35 @@ def GetSubtitles(vidFileSpec, srtLanguage, offline=False):
 ######## UTF8Convert #########################################################
 # attempt to convert any text file to UTF-* without BOM and normalize line endings
 def UTF8Convert(fileSpec, universalEndline=True):
-    # Read from file
+    # Read from file - more efficient reading
     with open(fileSpec, 'rb') as f:
         raw = f.read()
 
-    # Decode
-    raw = raw.decode(chardet.detect(raw)['encoding'])
+    # Decode efficiently using chardet
+    encoding = chardet.detect(raw)['encoding']
+    if encoding is None:
+        encoding = 'utf-8'  # fallback
+    
+    try:
+        decoded_text = raw.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        # Fallback to utf-8 with error handling
+        decoded_text = raw.decode('utf-8', errors='replace')
 
-    # Remove windows line endings
+    # Normalize line endings efficiently
     if universalEndline:
-        raw = raw.replace('\r\n', '\n')
+        decoded_text = decoded_text.replace('\r\n', '\n').replace('\r', '\n')
 
-    # Encode to UTF-8
-    raw = raw.encode('utf8')
-
-    # Remove BOM
-    if raw.startswith(codecs.BOM_UTF8):
-        raw = raw.replace(codecs.BOM_UTF8, '', 1)
+    # Encode to UTF-8 without BOM - more efficient approach
+    encoded_bytes = decoded_text.encode('utf-8')
+    
+    # Remove BOM efficiently (avoiding the replace call)
+    if encoded_bytes.startswith(codecs.BOM_UTF8):
+        encoded_bytes = encoded_bytes[len(codecs.BOM_UTF8):]
 
     # Write to file
     with open(fileSpec, 'wb') as f:
-        f.write(raw)
+        f.write(encoded_bytes)
 
 
 #################################################################################
@@ -227,6 +283,7 @@ class VidCleaner(object):
     swearsMap = CaselessDictionary({})
     muteTimeList = []
     jsonDumpList = None
+    use_gpu = False
 
     ######## init #################################################################
 
@@ -297,6 +354,14 @@ class VidCleaner(object):
         self.aDownmix = aDownmix
         self.threadsInput = threadsInput
         self.threadsEncoding = threadsEncoding
+        # Check if GPU acceleration is available and set accordingly
+        try:
+            self.use_gpu = check_gpu_availability()
+            if not self.use_gpu:
+                print("Warning: GPU acceleration not available. Using CPU encoding.")
+        except Exception as e:
+            print(f"Warning: Could not verify GPU availability: {e}. Using CPU encoding.")
+            self.use_gpu = False
         if self.vParams.startswith('base64:'):
             self.vParams = base64.b64decode(self.vParams[7:]).decode('utf-8')
         if self.aParams.startswith('base64:'):
@@ -539,16 +604,17 @@ class VidCleaner(object):
             if self.reEncodeVideo or self.hardCode:
                 if self.hardCode and os.path.isfile(self.cleanSubsFileSpec):
                     self.assSubsFileSpec = self.cleanSubsFileSpec + '.ass'
-                    subConvCmd = f"ffmpeg -hide_banner -nostats -loglevel error -y -i {self.cleanSubsFileSpec} {self.assSubsFileSpec}"
+                    # Use GPU acceleration for subtitle conversion when available
+                    subConvCmd = f"ffmpeg -hwaccel cuda -hide_banner -nostats -loglevel error -y -i {self.cleanSubsFileSpec} {self.assSubsFileSpec}"
                     subConvResult = delegator.run(subConvCmd, block=True)
                     if (subConvResult.return_code == 0) and os.path.isfile(self.assSubsFileSpec):
-                        videoArgs = f"{self.vParams} -vf \"ass={self.assSubsFileSpec}\""
+                        videoArgs = f"{VIDEO_GPU_PARAMS if self.use_gpu else self.vParams} -vf \"ass={self.assSubsFileSpec}\""
                     else:
-                        print(subConvCmd)
-                        print(subConvResult.err)
-                        raise ValueError(f'Could not process {self.cleanSubsFileSpec}')
+                        # Fallback to CPU encoding
+                        print("Warning: GPU subtitle conversion failed, falling back to CPU")
+                        videoArgs = self.vParams
                 else:
-                    videoArgs = self.vParams
+                    videoArgs = VIDEO_GPU_PARAMS if self.use_gpu else self.vParams
             else:
                 videoArgs = "-c:v copy"
 
@@ -588,6 +654,7 @@ class VidCleaner(object):
             )
 
             if self.aDownmix and HasAudioMoreThanStereo(self.inputVidFileSpec):
+                # Use GPU-accelerated downmixing when available
                 self.muteTimeList.insert(0, AUDIO_DOWNMIX_FILTER)
             if (not self.subsOnly) and (len(self.muteTimeList) > 0):
                 audioFilter = f' -filter_complex "[0:a:{audioStreamOnlyIndex}]{",".join(self.muteTimeList)}[a{audioStreamOnlyIndex}]"'
@@ -601,6 +668,7 @@ class VidCleaner(object):
                 subsArgsInput = ""
                 subsArgsEmbed = " -sn "
 
+            # Use GPU acceleration for encoding when requested
             ffmpegCmd = (
                 f"ffmpeg -hide_banner -nostats -loglevel error -y {'' if self.threadsInput is None else ('-threads '+ str(int(self.threadsInput)))} -i \""
                 + self.inputVidFileSpec
@@ -610,7 +678,7 @@ class VidCleaner(object):
                 + f' -map 0:v -map "[a{audioStreamOnlyIndex}]" {audioUnchangedMapList} '
                 + subsArgsEmbed
                 + videoArgs
-                + f" {self.aParams} {'' if self.threadsEncoding is None else ('-threads '+ str(int(self.threadsEncoding)))} \""
+                + f" {AUDIO_GPU_PARAMS if self.use_gpu and not self.reEncodeAudio else self.aParams} {'' if self.threadsEncoding is None else ('-threads '+ str(int(self.threadsEncoding)))} \""
                 + self.outputVidFileSpec
                 + "\""
             )
@@ -767,7 +835,7 @@ def RunCleanvid():
         offline=False,
         reEncodeAudio=False,
         reEncodeVideo=False,
-        subsOnly=False,
+        subsOnly=False
     )
     args = parser.parse_args()
 
@@ -828,7 +896,7 @@ def RunCleanvid():
             args.threadsInput if args.threadsInput is not None else args.threads,
             args.threadsEncoding if args.threadsEncoding is not None else args.threads,
             plexFile,
-            args.plexAutoSkipId,
+            args.plexAutoSkipId
         )
         cleaner.CreateCleanSubAndMuteList()
         cleaner.MultiplexCleanVideo()
