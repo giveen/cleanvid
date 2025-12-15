@@ -1,6 +1,35 @@
 [build-system]
-requires = [
-    "setuptools>=42",
-    "wheel"
-]
+requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "cleanvid"
+version = "1.7.0"
+authors = [
+    {name = "Seth Grover", email = "mero.mero.guero@gmail.com"},
+]
+description = "cleanvid is a little script to mute profanity in video files."
+readme = "README.md"
+license = {text = "BSD"}
+classifiers = [
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Video",
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: End Users/Desktop",
+]
+requires-python = ">=3.6"
+dependencies = [
+    "babelfish",
+    "delegator.py",
+    "pysrt",
+    "subliminal",
+]
+
+[project.scripts]
+cleanvid = "cleanvid:RunCleanvid"
+
+[project.urls]
+"Homepage" = "https://github.com/mmguero/cleanvid"
+"Bug Tracker" = "https://github.com/mmguero/cleanvid/issues"
