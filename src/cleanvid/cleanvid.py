@@ -11,9 +11,13 @@ import shutil
 import sys
 import re
 import pysrt
-import delegator
+import subprocess
+import shlex
 from datetime import datetime
-from subliminal import *
+from subliminal import Video, download_best_subtitles, save_subtitles
+import logging
+
+logger = logging.getLogger(__name__)
 from babelfish import Language
 from collections import OrderedDict
 
@@ -40,14 +44,46 @@ def pairwise(iterable):
     return zip(a, b)
 
 
+def _run_cmd(cmd_list):
+    try:
+        p = subprocess.run(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, text=True)
+        class R:
+            pass
+
+        r = R()
+        r.return_code = p.returncode
+        r.out = p.stdout
+        r.err = p.stderr
+        return r
+    except Exception as e:
+        class R:
+            pass
+
+        r = R()
+        r.return_code = 1
+        r.out = ''
+        r.err = str(e)
+        return r
+
+
 ######## GetFormatAndStreamInfo ###############################################
 def GetFormatAndStreamInfo(vidFileSpec):
     result = None
     if os.path.isfile(vidFileSpec):
-        ffprobeCmd = "ffprobe -loglevel quiet -print_format json -show_format -show_streams \"" + vidFileSpec + "\""
-        ffprobeResult = delegator.run(ffprobeCmd, block=True)
+        cmd = [
+            'ffprobe',
+            '-loglevel', 'quiet',
+            '-print_format', 'json',
+            '-show_format',
+            '-show_streams',
+            vidFileSpec,
+        ]
+        ffprobeResult = _run_cmd(cmd)
         if ffprobeResult.return_code == 0:
-            result = json.loads(ffprobeResult.out)
+            try:
+                result = json.loads(ffprobeResult.out)
+            except Exception:
+                result = None
     return result
 
 
@@ -55,14 +91,20 @@ def GetFormatAndStreamInfo(vidFileSpec):
 def GetAudioStreamsInfo(vidFileSpec):
     result = None
     if os.path.isfile(vidFileSpec):
-        ffprobeCmd = (
-            "ffprobe -loglevel quiet -select_streams a -show_entries stream=index,codec_name,sample_rate,channel_layout:stream_tags=language -of json \""
-            + vidFileSpec
-            + "\""
-        )
-        ffprobeResult = delegator.run(ffprobeCmd, block=True)
+        cmd = [
+            'ffprobe',
+            '-loglevel', 'quiet',
+            '-select_streams', 'a',
+            '-show_entries', 'stream=index,codec_name,sample_rate,channel_layout:stream_tags=language',
+            '-of', 'json',
+            vidFileSpec,
+        ]
+        ffprobeResult = _run_cmd(cmd)
         if ffprobeResult.return_code == 0:
-            result = json.loads(ffprobeResult.out)
+            try:
+                result = json.loads(ffprobeResult.out)
+            except Exception:
+                result = None
     return result
 
 
@@ -70,25 +112,22 @@ def GetAudioStreamsInfo(vidFileSpec):
 def GetStreamSubtitleMap(vidFileSpec):
     result = None
     if os.path.isfile(vidFileSpec):
-        ffprobeCmd = (
-            "ffprobe -loglevel quiet -select_streams s -show_entries stream=index:stream_tags=language -of csv=p=0 \""
-            + vidFileSpec
-            + "\""
-        )
-        ffprobeResult = delegator.run(ffprobeCmd, block=True)
+        cmd = [
+            'ffprobe',
+            '-loglevel', 'quiet',
+            '-select_streams', 's',
+            '-show_entries', 'stream=index:stream_tags=language',
+            '-of', 'csv=p=0',
+            vidFileSpec,
+        ]
+        ffprobeResult = _run_cmd(cmd)
         if ffprobeResult.return_code == 0:
-            # e.g. for ara and chi, "-map 0:5 -map 0:7" or "-map 0:s:3 -map 0:s:5"
-            # 2,eng
-            # 3,eng
-            # 4,eng
-            # 5,ara
-            # 6,bul
-            # 7,chi
-            # 8,cze
-            # 9,dan
             result = OrderedDict()
-            for l in [x.split(',') for x in ffprobeResult.out.split()]:
-                result[int(l[0])] = l[1]
+            try:
+                for l in [x.split(',') for x in ffprobeResult.out.split() if x.strip()]:
+                    result[int(l[0])] = l[1]
+            except Exception:
+                result = OrderedDict()
     return result
 
 
@@ -96,20 +135,21 @@ def GetStreamSubtitleMap(vidFileSpec):
 def HasAudioMoreThanStereo(vidFileSpec):
     result = False
     if os.path.isfile(vidFileSpec):
-        ffprobeCmd = (
-            "ffprobe -loglevel quiet -select_streams a -show_entries stream=channels -of csv=p=0 \""
-            + vidFileSpec
-            + "\""
-        )
-        ffprobeResult = delegator.run(ffprobeCmd, block=True)
+        cmd = [
+            'ffprobe',
+            '-loglevel', 'quiet',
+            '-select_streams', 'a',
+            '-show_entries', 'stream=channels',
+            '-of', 'csv=p=0',
+            vidFileSpec,
+        ]
+        ffprobeResult = _run_cmd(cmd)
         if ffprobeResult.return_code == 0:
-            result = any(
-                [
-                    x
-                    for x in [int(''.join([z for z in y if z.isdigit()])) for y in list(set(ffprobeResult.out.split()))]
-                    if x > 2
-                ]
-            )
+            try:
+                counts = [int(''.join([z for z in y if z.isdigit()])) for y in list(set(ffprobeResult.out.split()))]
+                result = any(x > 2 for x in counts)
+            except Exception:
+                result = False
     return result
 
 
@@ -134,14 +174,19 @@ def ExtractSubtitles(vidFileSpec, srtLanguage):
     ):
         subFileParts = os.path.splitext(vidFileSpec)
         subFileSpec = subFileParts[0] + "." + srtLanguage + ".srt"
-        ffmpegCmd = (
-            "ffmpeg -hide_banner -nostats -loglevel error -y -i \""
-            + vidFileSpec
-            + f"\" -map 0:{stream} \""
-            + subFileSpec
-            + "\""
-        )
-        ffmpegResult = delegator.run(ffmpegCmd, block=True)
+        cmd = [
+            'ffmpeg',
+            '-hide_banner',
+            '-nostats',
+            '-loglevel', 'error',
+            '-y',
+            '-i',
+            vidFileSpec,
+            '-map',
+            f'0:{stream}',
+            subFileSpec,
+        ]
+        ffmpegResult = _run_cmd(cmd)
         if (ffmpegResult.return_code != 0) or (not os.path.isfile(subFileSpec)):
             subFileSpec = ""
     return subFileSpec
@@ -176,8 +221,12 @@ def UTF8Convert(fileSpec, universalEndline=True):
     with open(fileSpec, 'rb') as f:
         raw = f.read()
 
-    # Decode
-    raw = raw.decode(chardet.detect(raw)['encoding'])
+    # Decode (use detected encoding or fallback to utf-8)
+    detected = chardet.detect(raw)
+    encoding = detected.get('encoding') if isinstance(detected, dict) else None
+    if not encoding:
+        encoding = 'utf-8'
+    raw = raw.decode(encoding, errors='replace')
 
     # Remove windows line endings
     if universalEndline:
@@ -304,17 +353,24 @@ class VidCleaner(object):
 
     ######## del ##################################################################
     def __del__(self):
-        if (not os.path.isfile(self.outputVidFileSpec)) and (not self.unalteredVideo):
-            if os.path.isfile(self.cleanSubsFileSpec):
-                os.remove(self.cleanSubsFileSpec)
-            if os.path.isfile(self.edlFileSpec):
-                os.remove(self.edlFileSpec)
-            if os.path.isfile(self.jsonFileSpec):
-                os.remove(self.jsonFileSpec)
-        if os.path.isfile(self.tmpSubsFileSpec):
-            os.remove(self.tmpSubsFileSpec)
-        if os.path.isfile(self.assSubsFileSpec):
-            os.remove(self.assSubsFileSpec)
+        try:
+            if (not getattr(self, 'outputVidFileSpec', None) or not os.path.isfile(self.outputVidFileSpec)) and (
+                not getattr(self, 'unalteredVideo', False)
+            ):
+                for p in (getattr(self, 'cleanSubsFileSpec', None), getattr(self, 'edlFileSpec', None), getattr(self, 'jsonFileSpec', None)):
+                    try:
+                        if p and os.path.isfile(p):
+                            os.remove(p)
+                    except OSError:
+                        logger.debug(f'Could not remove file during cleanup: {p}')
+            for p in (getattr(self, 'tmpSubsFileSpec', None), getattr(self, 'assSubsFileSpec', None)):
+                try:
+                    if p and os.path.isfile(p):
+                        os.remove(p)
+                except OSError:
+                    logger.debug(f'Could not remove file during cleanup: {p}')
+        except Exception as e:
+            logger.debug(f'Exception in __del__: {e}')
 
     ######## CreateCleanSubAndMuteList #################################################
     def CreateCleanSubAndMuteList(self):
@@ -354,7 +410,50 @@ class VidCleaner(object):
             else:
                 self.swearsMap[lineMap[0]] = "*****"
 
-        replacer = re.compile(r'\b(' + '|'.join(self.swearsMap.keys()) + r')\b', re.IGNORECASE)
+        # Build matcher: Aho–Corasick preferred, else regex
+        try:
+            import ahocorasick
+            A = ahocorasick.Automaton()
+            keys = sorted(list(self.swearsMap.keys()), key=lambda x: -len(x))
+            for k in keys:
+                A.add_word(k.lower(), k)
+            A.make_automaton()
+            use_aho = True
+        except Exception:
+            use_aho = False
+            escaped_keys = [re.escape(k) for k in sorted(list(self.swearsMap.keys()), key=lambda x: -len(x))]
+            pattern = r'\b(' + '|'.join(escaped_keys) + r')\b' if escaped_keys else r'$^'
+            replacer = re.compile(pattern, re.IGNORECASE)
+
+        def _is_word_boundary(lowtext, start, end):
+            left = start - 1
+            right = end
+            left_ok = (left < 0) or (not lowtext[left].isalnum())
+            right_ok = (right >= len(lowtext)) or (not lowtext[right].isalnum())
+            return left_ok and right_ok
+
+        def _apply_aho(text):
+            low = text.lower()
+            matches = []
+            for end_idx, key in A.iter(low):
+                klen = len(key)
+                start_idx = end_idx - klen + 1
+                if _is_word_boundary(low, start_idx, end_idx + 1):
+                    matches.append((start_idx, end_idx + 1, key))
+            if not matches:
+                return text
+            matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+            res = []
+            last = 0
+            for s, e, key in matches:
+                if s < last:
+                    continue
+                res.append(text[last:s])
+                replacement = self.swearsMap.get(key, '*****')
+                res.append(replacement)
+                last = e
+            res.append(text[last:])
+            return ''.join(res)
 
         subs = pysrt.open(self.tmpSubsFileSpec)
         newSubs = pysrt.SubRipFile()
@@ -377,10 +476,14 @@ class VidCleaner(object):
         # then include the subtitle in the new set
         prevNaughtySub = None
         for sub, subPeek in pairwise(subs):
-            newText = replacer.sub(lambda x: self.swearsMap[x.group()], sub.text)
-            newTextPeek = (
-                replacer.sub(lambda x: self.swearsMap[x.group()], subPeek.text) if (subPeek is not None) else None
-            )
+            if use_aho:
+                newText = _apply_aho(sub.text)
+                newTextPeek = _apply_aho(subPeek.text) if (subPeek is not None) else None
+            else:
+                newText = replacer.sub(lambda x: self.swearsMap[x.group()], sub.text)
+                newTextPeek = (
+                    replacer.sub(lambda x: self.swearsMap[x.group()], subPeek.text) if (subPeek is not None) else None
+                )
             # this sub contains profanity, or
             if (
                 (newText != sub.text)
@@ -539,21 +642,34 @@ class VidCleaner(object):
             if self.reEncodeVideo or self.hardCode:
                 if self.hardCode and os.path.isfile(self.cleanSubsFileSpec):
                     self.assSubsFileSpec = self.cleanSubsFileSpec + '.ass'
-                    subConvCmd = f"ffmpeg -hide_banner -nostats -loglevel error -y -i {self.cleanSubsFileSpec} {self.assSubsFileSpec}"
-                    subConvResult = delegator.run(subConvCmd, block=True)
+                    cmd = [
+                        'ffmpeg',
+                        '-hide_banner',
+                        '-nostats',
+                        '-loglevel', 'error',
+                        '-y',
+                        '-i',
+                        self.cleanSubsFileSpec,
+                        self.assSubsFileSpec,
+                    ]
+                    subConvResult = _run_cmd(cmd)
                     if (subConvResult.return_code == 0) and os.path.isfile(self.assSubsFileSpec):
                         videoArgs = f"{self.vParams} -vf \"ass={self.assSubsFileSpec}\""
                     else:
-                        print(subConvCmd)
-                        print(subConvResult.err)
-                        raise ValueError(f'Could not process {self.cleanSubsFileSpec}')
+                                        logger.error(' '.join(shlex.quote(x) for x in cmd))
+                                        logger.error(subConvResult.err)
+                                        raise ValueError(f'Could not process {self.cleanSubsFileSpec}')
                 else:
                     videoArgs = self.vParams
             else:
                 videoArgs = "-c:v copy"
 
             audioStreamOnlyIndex = 0
-            if audioStreams := GetAudioStreamsInfo(self.inputVidFileSpec).get('streams', []):
+            audio_info = GetAudioStreamsInfo(self.inputVidFileSpec)
+            audioStreams = (audio_info or {}).get('streams', [])
+            if not audioStreams:
+                raise ValueError(f'Could not determine audio streams in {self.inputVidFileSpec}')
+            if audioStreams:
                 if len(audioStreams) > 0:
                     if self.audioStreamIdx is None:
                         if len(audioStreams) == 1:
@@ -583,41 +699,55 @@ class VidCleaner(object):
             else:
                 raise ValueError(f'Could not determine audio streams in {self.inputVidFileSpec}')
             self.aParams = re.sub(r"-c:a(\s+)", rf"-c:a:{str(audioStreamOnlyIndex)}\1", self.aParams)
-            audioUnchangedMapList = ' '.join(
-                f'-map 0:a:{i}' if i != audioStreamOnlyIndex else '' for i in range(len(audioStreams))
-            )
+            audio_map_args = []
+            for i in range(len(audioStreams)):
+                if i != audioStreamOnlyIndex:
+                    audio_map_args += ['-map', f'0:a:{i}']
 
             if self.aDownmix and HasAudioMoreThanStereo(self.inputVidFileSpec):
                 self.muteTimeList.insert(0, AUDIO_DOWNMIX_FILTER)
+
+            cmd = [
+                'ffmpeg',
+                '-hide_banner',
+                '-nostats',
+                '-loglevel', 'error',
+                '-y',
+            ]
+            if self.threadsInput is not None:
+                cmd += ['-threads', str(int(self.threadsInput))]
+            cmd += ['-i', self.inputVidFileSpec]
+            if self.embedSubs and os.path.isfile(self.cleanSubsFileSpec):
+                cmd += ['-i', self.cleanSubsFileSpec]
+
             if (not self.subsOnly) and (len(self.muteTimeList) > 0):
-                audioFilter = f' -filter_complex "[0:a:{audioStreamOnlyIndex}]{",".join(self.muteTimeList)}[a{audioStreamOnlyIndex}]"'
-            else:
-                audioFilter = " "
+                filter_expr = f"[0:a:{audioStreamOnlyIndex}]" + ",".join(self.muteTimeList) + f"[a{audioStreamOnlyIndex}]"
+                cmd += ['-filter_complex', filter_expr]
+
+            cmd += ['-map', '0:v', '-map', f"[a{audioStreamOnlyIndex}]"]
+            if audio_map_args:
+                cmd += audio_map_args
+
             if self.embedSubs and os.path.isfile(self.cleanSubsFileSpec):
                 outFileParts = os.path.splitext(self.outputVidFileSpec)
-                subsArgsInput = f" -i \"{self.cleanSubsFileSpec}\" "
-                subsArgsEmbed = f" -map 1:s -c:s {'mov_text' if outFileParts[1] == '.mp4' else 'srt'} -disposition:s:0 default -metadata:s:s:0 language={self.subsLang} "
+                subs_codec = 'mov_text' if outFileParts[1] == '.mp4' else 'srt'
+                cmd += ['-map', '1:s', '-c:s', subs_codec, '-disposition:s:0', 'default', '-metadata:s:s:0', f'language={self.subsLang}']
             else:
-                subsArgsInput = ""
-                subsArgsEmbed = " -sn "
+                cmd += ['-sn']
 
-            ffmpegCmd = (
-                f"ffmpeg -hide_banner -nostats -loglevel error -y {'' if self.threadsInput is None else ('-threads '+ str(int(self.threadsInput)))} -i \""
-                + self.inputVidFileSpec
-                + "\""
-                + subsArgsInput
-                + audioFilter
-                + f' -map 0:v -map "[a{audioStreamOnlyIndex}]" {audioUnchangedMapList} '
-                + subsArgsEmbed
-                + videoArgs
-                + f" {self.aParams} {'' if self.threadsEncoding is None else ('-threads '+ str(int(self.threadsEncoding)))} \""
-                + self.outputVidFileSpec
-                + "\""
-            )
-            ffmpegResult = delegator.run(ffmpegCmd, block=True)
+            # add video args and audio params (they may contain multiple tokens)
+            if videoArgs:
+                cmd += shlex.split(videoArgs)
+            if self.aParams:
+                cmd += shlex.split(self.aParams)
+            if self.threadsEncoding is not None:
+                cmd += ['-threads', str(int(self.threadsEncoding))]
+            cmd += [self.outputVidFileSpec]
+
+            ffmpegResult = _run_cmd(cmd)
             if (ffmpegResult.return_code != 0) or (not os.path.isfile(self.outputVidFileSpec)):
-                print(ffmpegCmd)
-                print(ffmpegResult.err)
+                logger.error(' '.join(shlex.quote(x) for x in cmd))
+                logger.error(ffmpegResult.err)
                 raise ValueError(f'Could not process {self.inputVidFileSpec}')
         else:
             self.unalteredVideo = True
@@ -776,7 +906,7 @@ def RunCleanvid():
         # e.g.:
         #   1: aac, 44100 Hz, stereo, eng
         #   3: opus, 48000 Hz, stereo, jpn
-        print(
+        logger.info(
             '\n'.join(
                 [
                     f"{x['index']}: {x.get('codec_name', 'unknown codec')}, {x.get('sample_rate', 'unknown')} Hz, {x.get('channel_layout', 'unknown channel layout')}, {x.get('tags', {}).get('language', 'unknown language')}"
