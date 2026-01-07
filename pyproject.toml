@@ -4,3 +4,12 @@ requires = [
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
+
+[project]
+dependencies = [
+    "PySide6[all]",
+    "pysrt",
+    "subliminal",
+    "babelfish",
+    "chardet"
+]

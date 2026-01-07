@@ -89,11 +89,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-2. Install the package in editable mode and GUI dependencies:
+2. Install the package in editable mode (this will also install GUI/runtime dependencies declared in the project):
 
 ```bash
 pip install -e .
-pip install PySide6
 ```
 
 3. Launch the GUI (from the repository root):
@@ -102,7 +101,7 @@ pip install PySide6
 python src/cleanvid/cleanvid_gui.py
 ```
 
-If you encounter missing dependency errors, install the required packages listed above. The GUI is intended for development and testing; usage instructions and features may change.
+If you encounter missing dependency errors, run `pip install -e .` again or install the missing package directly. The GUI is intended for development and testing; usage instructions and features may change.
 
 
 ## Major CLI Options
