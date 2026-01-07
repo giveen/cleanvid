@@ -78,6 +78,33 @@ cleanvid --help
 
 ---
 
+## Running the GUI (development)
+
+Note: The GUI is experimental and is in active development. Use these instructions to run the development GUI locally.
+
+1. Create and activate the virtual environment (if you haven't already):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+2. Install the package in editable mode and GUI dependencies:
+
+```bash
+pip install -e .
+pip install PySide6
+```
+
+3. Launch the GUI (from the repository root):
+
+```bash
+python src/cleanvid/cleanvid_gui.py
+```
+
+If you encounter missing dependency errors, install the required packages listed above. The GUI is intended for development and testing; usage instructions and features may change.
+
+
 ## Major CLI Options
 
 - `-i`, `--input`           Input video file (required)
@@ -151,7 +178,8 @@ Pull requests are welcome! If you’d like to help improve cleanvid, feel free t
 ## 👤 Author
 
  ** Original Author ** **Seth Grover** — [mmguero](https://github.com/mmguero)
- ** Re-write Author ** ** Giveen **
+
+ ** Re-write Author: Giveen**
 
 ---
 
