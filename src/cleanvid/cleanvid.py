@@ -246,6 +246,7 @@ def UTF8Convert(fileSpec, universalEndline=True):
 
 #################################################################################
 class VidCleaner(object):
+        muteAudioIndex = 0
     inputVidFileSpec = ""
     inputSubsFileSpec = ""
     cleanSubsFileSpec = ""
@@ -314,8 +315,10 @@ class VidCleaner(object):
             self.inputSubsFileSpec = iSubsFileSpec
 
         if (iSwearsFileSpec is not None) and os.path.isfile(iSwearsFileSpec):
+        muteAudioIndex=0,
             self.swearsFileSpec = iSwearsFileSpec
         else:
+        self.muteAudioIndex = muteAudioIndex
             raise IOError(errno.ENOENT, os.strerror(errno.ENOENT), iSwearsFileSpec)
 
         if (oVidFileSpec is not None) and (len(oVidFileSpec) > 0):
@@ -755,6 +758,14 @@ class VidCleaner(object):
 
 #################################################################################
 def RunCleanvid():
+        parser.add_argument(
+            '--mute-audio-index',
+            help='Index of audio track to mute (others will be copied unchanged)',
+            metavar='<int>',
+            dest='muteAudioIndex',
+            type=int,
+            default=0,
+        )
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--gpu',
@@ -1003,6 +1014,7 @@ def RunCleanvid():
             args.threadsEncoding if args.threadsEncoding is not None else args.threads,
             plexFile,
             args.plexAutoSkipId,
+            args.muteAudioIndex,
         )
         cleaner.CreateCleanSubAndMuteList()
         cleaner.MultiplexCleanVideo()
