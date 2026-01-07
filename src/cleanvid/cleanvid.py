@@ -45,25 +45,33 @@ def pairwise(iterable):
 
 
 def _run_cmd(cmd_list):
+    # Delegate to ffmpeg_runner to centralize subprocess behavior and make it
+    # easier to add streaming/progress support later. Keep the same return
+    # shape (return_code, out, err) for backward compatibility.
     try:
-        p = subprocess.run(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, text=True)
-        class R:
-            pass
+        from cleanvid.ffmpeg_runner import run_cmd
+        return run_cmd(cmd_list)
+    except Exception:
+        # Fallback: emulate the old behaviour using subprocess directly
+        try:
+            p = subprocess.run(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, text=True)
+            class R:
+                pass
 
-        r = R()
-        r.return_code = p.returncode
-        r.out = p.stdout
-        r.err = p.stderr
-        return r
-    except Exception as e:
-        class R:
-            pass
+            r = R()
+            r.return_code = p.returncode
+            r.out = p.stdout
+            r.err = p.stderr
+            return r
+        except Exception as e:
+            class R:
+                pass
 
-        r = R()
-        r.return_code = 1
-        r.out = ''
-        r.err = str(e)
-        return r
+            r = R()
+            r.return_code = 1
+            r.out = ''
+            r.err = str(e)
+            return r
 
 
 ######## GetFormatAndStreamInfo ###############################################
