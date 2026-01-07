@@ -246,11 +246,11 @@ def UTF8Convert(fileSpec, universalEndline=True):
 
 #################################################################################
 class VidCleaner(object):
-            @staticmethod
-            def strip_subtitle_tags(text):
-                import re
-                return re.sub(r'\{[^}]+\}', '', text)
-        muteAudioIndex = 0
+    @staticmethod
+    def strip_subtitle_tags(text):
+        import re
+        return re.sub(r'\{[^}]+\}', '', text)
+    muteAudioIndex = 0
     inputVidFileSpec = ""
     inputSubsFileSpec = ""
     cleanSubsFileSpec = ""
@@ -319,10 +319,8 @@ class VidCleaner(object):
             self.inputSubsFileSpec = iSubsFileSpec
 
         if (iSwearsFileSpec is not None) and os.path.isfile(iSwearsFileSpec):
-        muteAudioIndex=0,
             self.swearsFileSpec = iSwearsFileSpec
         else:
-        self.muteAudioIndex = muteAudioIndex
             raise IOError(errno.ENOENT, os.strerror(errno.ENOENT), iSwearsFileSpec)
 
         if (oVidFileSpec is not None) and (len(oVidFileSpec) > 0):
@@ -766,15 +764,15 @@ class VidCleaner(object):
 
 #################################################################################
 def RunCleanvid():
-        parser.add_argument(
-            '--mute-audio-index',
-            help='Index of audio track to mute (others will be copied unchanged)',
-            metavar='<int>',
-            dest='muteAudioIndex',
-            type=int,
-            default=0,
-        )
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--mute-audio-index',
+        help='Index of audio track to mute (others will be copied unchanged)',
+        metavar='<int>',
+        dest='muteAudioIndex',
+        type=int,
+        default=0,
+    )
     parser.add_argument(
         '--gpu',
         help='Enable GPU acceleration (auto-detects and selects best encoder: NVIDIA, Intel, AMD)',
@@ -940,8 +938,11 @@ def RunCleanvid():
                 ]
             )
         )
-
     else:
+        # Prepare args (subtitle auto-detection, GPU detection) then delegate
+        # the orchestration to the new core module.
+        import cleanvid.core as core
+
         inFile = args.input
         outFile = args.output
         subsFile = args.subs
@@ -956,38 +957,33 @@ def RunCleanvid():
             if args.plexAutoSkipId and not plexFile:
                 plexFile = inFileParts[0] + "_PlexAutoSkip_clean.json"
 
-        if plexFile and not args.plexAutoSkipId:
-            raise ValueError(
-                f'Content ID must be specified if creating a PlexAutoSkip JSON file (https://github.com/mdhiggins/PlexAutoSkip/wiki/Identifiers)'
-            )
+        # Update mutable args before handing off
+        args.output = outFile
+        args.subs = subsFile
+        args.plexAutoSkipJson = plexFile
 
-        # GPU detection and encoder selection
+        # GPU detection and encoder selection (preserve previous behavior)
         vParams = args.vParams
         if args.gpu:
             import platform, subprocess
             encoder = None
             try:
-                # NVIDIA detection
                 nvidia_smi = shutil.which('nvidia-smi')
                 if nvidia_smi:
                     encoder = 'h264_nvenc'
                 else:
-                    # Intel detection (VAAPI)
                     vainfo = shutil.which('vainfo')
                     if vainfo:
-                        # Check for VAAPI support
                         vaapi_out = subprocess.run([vainfo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                         if 'H264' in vaapi_out.stdout or 'H264' in vaapi_out.stderr:
                             encoder = 'h264_vaapi'
-                    # AMD detection (AMF/VAAPI)
                     if not encoder:
                         lspci = shutil.which('lspci')
                         if lspci:
                             lspci_out = subprocess.run([lspci], stdout=subprocess.PIPE, text=True).stdout
                             if 'AMD' in lspci_out or 'ATI' in lspci_out:
-                                encoder = 'h264_vaapi'  # fallback for AMD
+                                encoder = 'h264_vaapi'
                 if encoder:
-                    # Replace -c:v in vParams or append if missing
                     if '-c:v' in vParams:
                         vParams = re.sub(r'-c:v\s+\S+', f'-c:v {encoder}', vParams)
                     else:
@@ -998,34 +994,10 @@ def RunCleanvid():
             except Exception as e:
                 print(f"[cleanvid] GPU detection failed: {e}\nFalling back to CPU encoding.")
 
-        cleaner = VidCleaner(
-            inFile,
-            subsFile,
-            outFile,
-            args.subsOut,
-            args.swears,
-            args.pad,
-            args.embedSubs,
-            args.fullSubs,
-            args.subsOnly,
-            args.edl,
-            args.json,
-            lang,
-            args.reEncodeVideo,
-            args.reEncodeAudio,
-            args.hardCode,
-            vParams,
-            args.audioStreamIdx,
-            args.aParams,
-            args.aDownmix,
-            args.threadsInput if args.threadsInput is not None else args.threads,
-            args.threadsEncoding if args.threadsEncoding is not None else args.threads,
-            plexFile,
-            args.plexAutoSkipId,
-            args.muteAudioIndex,
-        )
-        cleaner.CreateCleanSubAndMuteList()
-        cleaner.MultiplexCleanVideo()
+        args.vParams = vParams
+
+        # Delegate orchestration to core
+        core.run_cleanvid(VidCleaner, args)
 
 
 #################################################################################
