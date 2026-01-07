@@ -246,6 +246,10 @@ def UTF8Convert(fileSpec, universalEndline=True):
 
 #################################################################################
 class VidCleaner(object):
+            @staticmethod
+            def strip_subtitle_tags(text):
+                import re
+                return re.sub(r'\{[^}]+\}', '', text)
         muteAudioIndex = 0
     inputVidFileSpec = ""
     inputSubsFileSpec = ""
@@ -487,6 +491,10 @@ class VidCleaner(object):
                 newTextPeek = (
                     replacer.sub(lambda x: self.swearsMap[x.group()], subPeek.text) if (subPeek is not None) else None
                 )
+            # Strip formatting tags from cleaned text
+            newText = self.strip_subtitle_tags(newText)
+            if newTextPeek is not None:
+                newTextPeek = self.strip_subtitle_tags(newTextPeek)
             # this sub contains profanity, or
             if (
                 (newText != sub.text)
