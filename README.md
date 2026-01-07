@@ -1,147 +1,144 @@
+
 # 🧼 cleanvid
 
-[![Latest Version](https://img.shields.io/pypi/v/cleanvid)](https://pypi.python.org/pypi/cleanvid/) [![Docker Image](https://github.com/mmguero/cleanvid/workflows/cleanvid-build-push-ghcr/badge.svg)](https://github.com/mmguero/cleanvid/pkgs/container/cleanvid)
+**cleanvid** mutes profanity in video files by using subtitle-based detection and audio stream editing. It supports fast audio muting, subtitle cleaning, and hardware-accelerated video encoding (GPU) for maximum performance.
 
-**cleanvid** is a script to mute profanity in video files using subtitle-based detection and audio stream editing. It works in four steps:
-
-1. You provide a video file and matching `.srt` subtitle file. If subtitles aren’t provided, cleanvid will extract them or use [`subliminal`](https://github.com/Diaoul/subliminal) to download the best match.
-2. [`pysrt`](https://github.com/byroot/pysrt) parses the `.srt` file and checks each entry against a [list](./src/cleanvid/swears.txt) of objectionable words. You can provide mappings (e.g., "sh*t" → "poop") or let cleanvid replace them with `*****`.
-3. A new "clean" `.srt` file is created with only the censored phrases.
-4. [`ffmpeg`](https://www.ffmpeg.org/) is used to mute the audio stream during those segments. The cleaned audio is re-encoded and remuxed with the original video. Optionally, the clean `.srt` file can be embedded as a subtitle track.
-
-You can then play the cleaned video with your favorite media player.
-
-As an alternative to creating a new video file, cleanvid can generate:
-- An [EDL file](http://www.mplayerhq.hu/DOCS/HTML/en/edl.html) for MPlayer or Kodi
-- A JSON definition file for [PlexAutoSkip](https://github.com/mdhiggins/PlexAutoSkip)
-
-**cleanvid** is part of a family of censorship tools:
-
-* 📼 [cleanvid](https://github.com/mmguero/cleanvid) for video files
-* 🎤 [monkeyplug](https://github.com/mmguero/monkeyplug) for audio/video using Whisper or Vosk
-* 📕 [montag](https://github.com/mmguero/montag) for ebooks
+## Features
+- Mute audio segments containing profanity (based on subtitles and a customizable word list)
+- Create clean subtitle files with censored phrases
+- Optionally embed or hardcode subtitles
+- Generate EDL and PlexAutoSkip JSON files for external players
+- Fast processing: copy video, re-encode audio only, or fully re-encode video
+- **NEW:** Automatic GPU acceleration (`--gpu`) for NVIDIA, Intel, or AMD
 
 ---
 
-## 📦 Installation
 
-Install the latest release from PyPI:
+## Installation
 
+### Prerequisites
+- Python 3.7 or newer
+- FFmpeg (v6 or newer recommended)
+  - Install via your OS package manager (e.g., `sudo apt install ffmpeg`) or from [ffmpeg.org](https://ffmpeg.org/download.html)
+
+
+### Recommended: Use a Python virtual environment
 ```bash
-python3 -m pip install -U cleanvid
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-Or install directly from GitHub:
 
+### Install from source (for latest development version)
 ```bash
-python3 -m pip install -U 'git+https://github.com/mmguero/cleanvid'
+git clone https://github.com/giveen/cleanvid.git
+cd cleanvid
+pip install -e .
 ```
 
----
-
-## 🔧 Prerequisites
-
-cleanvid requires:
-
-- Python 3
-- [FFmpeg](https://www.ffmpeg.org)
-- [babelfish](https://github.com/Diaoul/babelfish)
-- [delegator.py](https://github.com/kennethreitz/delegator.py)
-- [pysrt](https://github.com/byroot/pysrt)
-- [subliminal](https://github.com/Diaoul/subliminal)
-
-Install FFmpeg via your OS package manager or from [ffmpeg.org](https://www.ffmpeg.org/download.html). Python dependencies are installed automatically via `pip`.
-
----
-
-## 🚀 Usage
-
+### Required Python packages (if installing manually)
 ```bash
-cleanvid -i EXAMPLE.mp4 -s subs.srt -o output.mp4 --re-encode-audio
+pip install babelfish pysrt subliminal
 ```
 
-For full options:
-
+### Verify installation
 ```bash
 cleanvid --help
 ```
 
-See the full CLI reference above for all flags and modes.
+---
+
+## Usage
+
+### Basic Example
+```bash
+cleanvid -i input.mp4 -s subs.srt -o output.mp4 --re-encode-audio
+```
+
+### Fastest (audio-only mute, copy video)
+```bash
+cleanvid -i input.mp4 -o output.mp4 -a "-c:a aac -b:a 224k -ar 48000" -v "-c:v copy"
+```
+
+### Full re-encode (CPU)
+```bash
+cleanvid -i input.mp4 -o output.mp4 --re-encode-video -v "-c:v libx264 -preset fast -crf 22 -threads 8" -a "-c:a aac -b:a 224k -ar 48000"
+```
+
+### GPU acceleration (NVIDIA/Intel/AMD)
+```bash
+cleanvid -i input.mp4 -o output.mp4 --re-encode-video --gpu
+```
+This will auto-detect your GPU and select the best encoder (e.g., `h264_nvenc` for NVIDIA).
+
+### Show all options
+```bash
+cleanvid --help
+```
 
 ---
 
-## 🐳 Docker Support
+## Major CLI Options
 
-A [Dockerfile](./docker/Dockerfile) is provided to run cleanvid in a container. GPU acceleration is supported via NVIDIA NVENC.
+- `-i`, `--input`           Input video file (required)
+- `-o`, `--output`          Output video file
+- `-s`, `--subs`            Subtitle file (.srt)
+- `-w`, `--swears`          Profanity list file
+- `-v`, `--video-params`    Custom ffmpeg video parameters
+- `-a`, `--audio-params`    Custom ffmpeg audio parameters
+- `--re-encode-video`       Force video re-encoding
+- `--re-encode-audio`       Force audio re-encoding
+- `--gpu`                   Enable GPU acceleration (auto-detects and selects best encoder)
+- `--embed-subs`            Embed subtitles in output
+- `--burn`                  Hardcode subtitles (implies re-encode)
+- `--subs-only`             Only operate on subtitles
+- `--edl`                   Generate EDL file
+- `--json`                  Generate JSON file for muted segments
 
-### 🔧 Build the Image
+---
 
+## GPU Acceleration FAQ
+
+- **How do I enable GPU?**
+  Add `--gpu` to your command. cleanvid will auto-detect NVIDIA, Intel, or AMD and select the best encoder.
+- **What if I have multiple GPUs?**
+  cleanvid uses the first detected GPU. For advanced control, manually set `-v "-c:v h264_nvenc"` or similar.
+- **What if no GPU is found?**
+  cleanvid falls back to CPU encoding (`libx264`).
+
+
+---
+
+## Docker Usage
+
+Build the image:
 ```bash
 ./docker/build_docker.sh
 ```
 
-This builds a container with FFmpeg 8.0 and NVENC support.
 
-### 🚀 Run with GPU Acceleration
-
-To use NVIDIA GPU acceleration:
-
-1. Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-2. Run with `--gpus all` and mount the required runtime libraries:
-
+Run in Docker:
 ```bash
-sudo docker run --rm --gpus all \
+sudo docker run --rm \
   -v "$PWD:/videos" \
-  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
-  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
-  --entrypoint ffmpeg \
-  oci.guero.org/cleanvid:gpu \
-  -y \
-  -i /videos/EXAMPLE.mp4 \
-  -c:v h264_nvenc -preset fast -crf 23 \
-  -an \
-  /videos/output.nvenc.mp4
-```
-
-> ⚠️ This command mounts the required NVIDIA runtime libraries (`libnvidia-encode.so.1`, `libnvcuvid.so.1`) from your host into the container. Without these, FFmpeg will not be able to access NVENC encoders and will silently fall back to CPU or fail.
-
-> ✅ You must have an NVIDIA GPU and driver version ≥ 570.0 installed on your host system.
-
----
-
-### 🧪 Verify NVENC Availability
-
-```bash
-sudo docker run --rm --gpus all \
-  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
-  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
-  --entrypoint ffmpeg \
-  oci.guero.org/cleanvid:gpu -encoders | grep nvenc
-```
-
-You should see:
-```
-V....D h264_nvenc           NVIDIA NVENC H.264 encoder (codec h264)
+  --entrypoint cleanvid \
+  oci.guero.org/cleanvid:latest \
+  -i /videos/input.mp4 --re-encode-video -o /videos/output.mp4
 ```
 
 ---
 
-### 🛠️ Run Interactively (for debugging)
+## Troubleshooting
 
-```bash
-sudo docker run --rm -it --gpus all \
-  -v "$PWD:/videos" \
-  -v /usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1:ro \
-  -v /usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1:ro \
-  --entrypoint /bin/bash \
-  oci.guero.org/cleanvid:gpu
-```
+- **ffmpeg not found:** Install ffmpeg and ensure it is in your PATH.
+- **Missing Python packages:** Run `python3 -m pip install -U -r requirements.txt`.
+- **GPU not detected:** Ensure drivers and runtime libraries are installed. Use `nvidia-smi` (NVIDIA), `vainfo` (Intel/AMD) to verify.
 
-Then run:
+---
 
-```bash
-cleanvid -i EXAMPLE.mp4 --re-encode-video -o output.mp4
-```
+## License
+BSD 3-Clause License — see [LICENSE](LICENSE)
+
 
 ---
 
@@ -153,7 +150,8 @@ Pull requests are welcome! If you’d like to help improve cleanvid, feel free t
 
 ## 👤 Author
 
-**Seth Grover** — [mmguero](https://github.com/mmguero)
+ ** Original Author ** **Seth Grover** — [mmguero](https://github.com/mmguero)
+ ** Re-write Author ** ** Giveen **
 
 ---
 
@@ -172,3 +170,7 @@ Thanks to:
 - [delegator.py](https://github.com/kennethreitz/delegator.py) by Kenneth Reitz
 - [pysrt](https://github.com/byroot/pysrt) by Jean Boussier
 - [subliminal](https://github.com/Diaoul/subliminal) by Antoine Bertin
+- [FFmpeg](https://www.ffmpeg.org)
+- [pysrt](https://github.com/byroot/pysrt)
+- [subliminal](https://github.com/Diaoul/subliminal)
+- [babelfish](https://github.com/Diaoul/babelfish)
