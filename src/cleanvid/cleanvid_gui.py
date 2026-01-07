@@ -3,14 +3,68 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QTabWidget,
     QPushButton, QLabel, QLineEdit, QFileDialog, QComboBox, QCheckBox, QGroupBox,
     QToolBar, QStyle, QSpacerItem, QSizePolicy, QMessageBox, QListWidget,
-    QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QSlider, QFrame, QDockWidget
+    QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QSlider, QFrame, QDockWidget, QProgressBar
 )
 from PySide6 import QtWidgets
 from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import Qt, QUrl, QSettings
+from PySide6.QtCore import Qt, QUrl, QSettings, QTimer
+from PySide6.QtCore import QThread, QObject, Signal
+from PySide6.QtGui import QPainter, QColor, QPen
+
+
+# Simple spinner widget (no external assets) to indicate work in progress
+class Spinner(QWidget):
+    def __init__(self, parent=None, diameter=16):
+        super().__init__(parent)
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._on_timeout)
+        self._diameter = diameter
+        self.setFixedSize(diameter + 4, diameter + 4)
+
+    def _on_timeout(self):
+        self._angle = (self._angle + 30) % 360
+        self.update()
+
+    def start(self):
+        self._timer.start()
+
+    def stop(self):
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        cx = rect.center().x()
+        cy = rect.center().y()
+        radius = min(rect.width(), rect.height()) / 2 - 2
+        pen = QPen(QColor(100, 100, 100))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        for i in range(12):
+            alpha = (i * 20) % 255
+            color = QColor(70, 130, 180)
+            color.setAlphaF((i + 1) / 12.0)
+            painter.setPen(QPen(color, 2))
+            angle = (self._angle + i * 30) * 3.14159 / 180.0
+            x1 = cx + (radius - 4) * 0.7 * (1) * 0.0
+            y1 = cy
+            # draw short line segments around circle
+            x1 = cx + (radius - 4) * 0.6 * __import__('math').cos(angle)
+            y1 = cy + (radius - 4) * 0.6 * __import__('math').sin(angle)
+            x2 = cx + radius * __import__('math').cos(angle)
+            y2 = cy + radius * __import__('math').sin(angle)
+            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
 import os
+import time
 import traceback
 import logging
+import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cleanvid import VidCleaner, SUBTITLE_DEFAULT_LANG, VIDEO_DEFAULT_PARAMS, AUDIO_DEFAULT_PARAMS
 
@@ -247,6 +301,26 @@ class CleanVidGUI(QMainWindow):
         edit_subs_action.triggered.connect(self.show_subtitle_editor)
         toolbar.addAction(edit_subs_action)
 
+        # Encode / Run action in toolbar
+        encode_action = QAction(QIcon.fromTheme("media-record"), "Encode", self)
+        encode_action.setToolTip("Run CleanVid to process the current source/output settings")
+        encode_action.triggered.connect(self.start_encode_with_estimate)
+        toolbar.addAction(encode_action)
+
+        # Threads override control (small spinbox) so users can set encoding threads
+        try:
+            threads_label = QLabel("Threads:")
+            toolbar.addWidget(threads_label)
+            self.threads_spin = QtWidgets.QSpinBox()
+            max_threads = max(1, (os.cpu_count() or 1))
+            default_threads = max(1, (os.cpu_count() or 1) - 2)
+            self.threads_spin.setRange(1, max_threads)
+            self.threads_spin.setValue(default_threads)
+            self.threads_spin.setToolTip("Override ffmpeg -threads (default: all-but-2 cores)")
+            toolbar.addWidget(self.threads_spin)
+        except Exception:
+            self.threads_spin = None
+
         # queue feature removed
 
         # Central widget and main layout
@@ -389,6 +463,70 @@ class CleanVidGUI(QMainWindow):
             # If edited subtitles exist, use them
             # Otherwise, use original
             self.live_subs = [(sub.start.ordinal, sub.end.ordinal, sub.text) for sub in subs]
+
+    def _export_edited_table_to_temp_srt(self):
+        """Export the currently-edited subtitle table to a temporary .srt and
+        return (temp_path, mute_filter_list). Returns (None, None) on failure.
+        """
+        try:
+            import pysrt
+            # Determine source srt used to align timing
+            editor_field = getattr(self, 'subs_file_edit', None)
+            if editor_field is not None:
+                srt_path = editor_field.text().strip()
+            else:
+                srt_path = self.subs_file.text().strip() if hasattr(self, 'subs_file') else ""
+            if not srt_path or not os.path.isfile(srt_path):
+                return None, None
+            orig_subs = pysrt.open(srt_path)
+            new_subs = pysrt.SubRipFile()
+            mute_filters = []
+            for row in range(self.subtitle_table.rowCount()):
+                # Use original timing, but replacement text if present
+                if row >= len(orig_subs):
+                    continue
+                orig = orig_subs[row]
+                repl_item = self.subtitle_table.item(row, 4)
+                text = repl_item.text() if (repl_item and repl_item.text()) else orig.text
+                new_item = pysrt.SubRipItem(index=orig.index, start=orig.start, end=orig.end, text=text)
+                new_subs.append(new_item)
+                # Mute checkbox
+                try:
+                    mute_chk = self.subtitle_table.cellWidget(row, 5)
+                except Exception:
+                    mute_chk = None
+                if mute_chk is not None and isinstance(mute_chk, QCheckBox) and mute_chk.isChecked():
+                    def _tsecs(t):
+                        tt = t.to_time()
+                        return (tt.hour * 3600) + (tt.minute * 60) + tt.second + (tt.microsecond / 1000000.0)
+
+                    lineStart = _tsecs(orig.start)
+                    lineEnd = _tsecs(orig.end)
+                    # next start (peek) for fade-in window
+                    if (row + 1) < len(orig_subs):
+                        next_start = _tsecs(orig_subs[row + 1].start)
+                    else:
+                        next_start = lineEnd + 0.1
+                    mute_filters.append(
+                        "afade=enable='between(t," + format(lineStart, '.3f') + "," + format(lineEnd, '.3f') +")':t=out:st=" + format(lineStart, '.3f') + ":d=10ms"
+                    )
+                    mute_filters.append(
+                        "afade=enable='between(t," + format(lineEnd, '.3f') + "," + format(next_start, '.3f') +")':t=in:st=" + format(lineEnd, '.3f') + ":d=10ms"
+                    )
+
+            # Create temp file in same directory as source srt for relative paths
+            try:
+                dirpath = os.path.dirname(srt_path) or None
+            except Exception:
+                dirpath = None
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.srt', prefix='cleanvid_edit_', dir=dirpath)
+            tmp_path = tmp.name
+            tmp.close()
+            new_subs.save(tmp_path)
+            return tmp_path, mute_filters
+        except Exception:
+            logging.exception("Failed to export edited subtitle table to temp srt")
+            return None, None
 
     def _clear_layout(self, layout):
         """Recursively remove all items from a QLayout, including nested layouts and widgets.
@@ -721,11 +859,14 @@ class CleanVidGUI(QMainWindow):
 
     def run_cleanvid(self):
         src = self.source_file.text().strip()
-        out = self.save_file.text().strip()
+        # Allow missing `save_file` widget by falling back to a sensible default
+        if hasattr(self, 'save_file') and getattr(self, 'save_file') is not None:
+            out = self.save_file.text().strip()
+        else:
+            out = os.path.splitext(src)[0] + "_clean" + os.path.splitext(src)[1] if src else ""
         swears = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'swears.txt')
         subs = None  # Let cleanvid auto-detect or download
         lang = SUBTITLE_DEFAULT_LANG
-        pad = 0.0
         embedSubs = False
         fullSubs = False
         subsOnly = False
@@ -739,7 +880,7 @@ class CleanVidGUI(QMainWindow):
         aParams = AUDIO_DEFAULT_PARAMS
         aDownmix = False
         threadsInput = None
-        threadsEncoding = None
+        threadsEncoding = max(1, (os.cpu_count() or 1) - 2)  # Set default threadsEncoding to all but 2 cores
         plexAutoSkipJson = ""
         plexAutoSkipId = ""
         subsOut = ""
@@ -755,6 +896,7 @@ class CleanVidGUI(QMainWindow):
                 subsOut,
                 swears,
                 pad,
+                            threadsEncoding,
                 embedSubs,
                 fullSubs,
                 subsOnly,
@@ -769,7 +911,7 @@ class CleanVidGUI(QMainWindow):
                 aParams,
                 aDownmix,
                 threadsInput,
-                threadsEncoding,
+                    max(1, (os.cpu_count() or 1) - 2),  # Set default threadsEncoding to all but 2 cores
                 plexAutoSkipJson,
                 plexAutoSkipId,
             )
@@ -779,6 +921,350 @@ class CleanVidGUI(QMainWindow):
         except Exception as e:
             tb = traceback.format_exc()
             QMessageBox.critical(self, "CleanVid Error", f"Error: {e}\n\n{tb}")
+
+    # ----- Background encode worker and progress estimation -----
+    class _EncodeWorker(QObject):
+        finished = Signal(bool, str)
+        # emits a dict with keys like 'percent', 'out_time_ms', 'duration', 'eta'
+        progress = Signal(dict)
+
+        def __init__(self, src, subs, out, edited_clean_subs=None, edited_mute_list=None, threadsEncoding=None, parent=None):
+            super().__init__(parent)
+            self.src = src
+            self.subs = subs
+            self.out = out
+            # If provided, these are the GUI-exported cleaned subtitle file and precomputed mute filters.
+            self.edited_clean_subs = edited_clean_subs
+            self.edited_mute_list = edited_mute_list or []
+            # Optional override for ffmpeg encoding threads
+            self.threadsEncoding = threadsEncoding
+
+            # Smoothing / throttling state
+            self._start_time = None
+            self._last_emit_time = 0
+            self._ema_percent = None
+
+        def run(self):
+            try:
+                self._start_time = time.time()
+                swears = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'swears.txt')
+                subs = None
+                lang = SUBTITLE_DEFAULT_LANG
+                pad = 0.0
+                embedSubs = False
+                fullSubs = False
+                subsOnly = False
+                edl = False
+                jsonDump = False
+                reEncodeVideo = False
+                reEncodeAudio = False
+                hardCode = False
+                vParams = VIDEO_DEFAULT_PARAMS
+                audioStreamIdx = None
+                aParams = AUDIO_DEFAULT_PARAMS
+                aDownmix = False
+                threadsInput = None
+                # Use override if present, otherwise default all-but-2 cores
+                threadsEncoding = self.threadsEncoding if (self.threadsEncoding is not None) else max(1, (os.cpu_count() or 1) - 2)
+                plexAutoSkipJson = ""
+                plexAutoSkipId = ""
+                subsOut = ""
+                cleaner = VidCleaner(
+                    self.src,
+                    self.subs,
+                    self.out,
+                    subsOut,
+                    swears,
+                    pad,
+                    embedSubs,
+                    fullSubs,
+                    subsOnly,
+                    edl,
+                    jsonDump,
+                    lang,
+                    reEncodeVideo,
+                    reEncodeAudio,
+                    hardCode,
+                    vParams,
+                    audioStreamIdx,
+                    aParams,
+                    aDownmix,
+                    threadsInput,
+                    threadsEncoding,
+                    plexAutoSkipJson,
+                    plexAutoSkipId,
+                )
+
+                # Fetch duration if possible
+                try:
+                    from cleanvid.cleanvid import GetFormatAndStreamInfo
+                    info = GetFormatAndStreamInfo(self.src) or {}
+                    duration = float((info.get('format') or {}).get('duration') or 0) or None
+                except Exception:
+                    duration = None
+
+                # Exponential smoothing + throttled emit
+                alpha = 0.25
+                min_interval = 0.20  # seconds (5 Hz)
+
+                def _emit_progress(d):
+                    now = time.time()
+                    # Throttle frequent updates
+                    if (now - self._last_emit_time) < min_interval:
+                        return
+                    try:
+                        out_time_ms = int(d.get('out_time_ms', '0'))
+                    except Exception:
+                        out_time_ms = 0
+                    # ffmpeg '-progress' reports out_time_ms as microseconds (us),
+                    # so convert to seconds by dividing by 1_000_000.
+                    out_s = out_time_ms / 1000000.0
+                    raw_percent = None
+                    if duration and duration > 0:
+                        try:
+                            raw_percent = (out_s / duration) * 100.0
+                        except Exception:
+                            raw_percent = None
+
+                    # Update EMA
+                    if raw_percent is not None:
+                        if self._ema_percent is None:
+                            self._ema_percent = raw_percent
+                        else:
+                            self._ema_percent = self._ema_percent + alpha * (raw_percent - self._ema_percent)
+
+                    # Parse speed (ffmpeg reports like '8.18x')
+                    speed = None
+                    try:
+                        sp = d.get('speed')
+                        if isinstance(sp, str) and sp.endswith('x'):
+                            speed = float(sp.rstrip('x'))
+                        elif sp is not None:
+                            speed = float(sp)
+                    except Exception:
+                        speed = None
+
+                    eta = None
+                    if duration and speed and (duration > out_s):
+                        try:
+                            eta = int(max(0, (duration - out_s) / speed))
+                        except Exception:
+                            eta = None
+
+                    payload = {
+                        'percent': int(self._ema_percent) if self._ema_percent is not None else (int(raw_percent) if raw_percent is not None else None),
+                        'smoothed_percent': self._ema_percent,
+                        'out_time_ms': out_time_ms,
+                        'duration': duration,
+                        'eta': eta,
+                        'raw': d,
+                    }
+                    try:
+                        self.progress.emit(payload)
+                        self._last_emit_time = now
+                    except Exception:
+                        pass
+
+                # If the GUI exported an edited cleaned subtitle file, use that and
+                # pre-populate the mute filter list, skipping the normal CreateCleanSubAndMuteList
+                # which would overwrite the provided cleaned subtitles.
+                if self.edited_clean_subs:
+                    cleaner.cleanSubsFileSpec = self.edited_clean_subs
+                    cleaner.muteTimeList = list(self.edited_mute_list)
+                    cleaner.MultiplexCleanVideo(progress_callback=_emit_progress)
+                else:
+                    cleaner.CreateCleanSubAndMuteList()
+                    cleaner.MultiplexCleanVideo(progress_callback=_emit_progress)
+                self.finished.emit(True, "")
+            except Exception as e:
+                import traceback as _tb
+                self.finished.emit(False, _tb.format_exc())
+
+    def start_encode_with_estimate(self):
+        # Validate inputs
+        src = self.source_file.text().strip()
+        if hasattr(self, 'save_file') and getattr(self, 'save_file') is not None:
+            out = self.save_file.text().strip()
+        else:
+            out = os.path.splitext(src)[0] + "_clean" + os.path.splitext(src)[1] if src else ""
+        if not src or not out:
+            QMessageBox.warning(self, "CleanVid", "Please select both input and output files.")
+            return
+
+        # If the user has an edited subtitle table, export it to a temp .srt
+        edited_clean_subs = None
+        edited_mute_list = None
+        try:
+            if hasattr(self, 'subtitle_table') and (self.subtitle_table.rowCount() > 0):
+                edited_clean_subs, edited_mute_list = self._export_edited_table_to_temp_srt()
+                # remember temp path for cleanup later
+                if edited_clean_subs:
+                    self._temp_subs_path = edited_clean_subs
+        except Exception:
+            edited_clean_subs = None
+            edited_mute_list = None
+
+        # Worker thread
+        try:
+            with open('/tmp/cleanvid_debug.log', 'a') as _d:
+                _d.write('STARTING encode: src=%s out=%s\n' % (src, out))
+        except Exception:
+            pass
+        self._encode_thread = QThread()
+        # Determine subtitle file: explicit field, guessed .srt, or try auto-extract (offline)
+        subs_path = None
+        try:
+            candidate = self.subs_file.text().strip() if hasattr(self, 'subs_file') else ''
+            if candidate and os.path.isfile(candidate):
+                subs_path = candidate
+            else:
+                guess = os.path.splitext(src)[0] + '.srt'
+                if os.path.isfile(guess):
+                    subs_path = guess
+                else:
+                    # don't attempt network downloads here; require explicit .srt
+                    subs_path = None
+        except Exception:
+            subs_path = None
+
+        if not subs_path:
+            QMessageBox.warning(self, "CleanVid", "Subtitle file not found. Please select a subtitle (.srt) file.")
+            return
+
+        threads_override = None
+        try:
+            if getattr(self, 'threads_spin', None):
+                threads_override = int(self.threads_spin.value())
+        except Exception:
+            threads_override = None
+        self._encode_worker = self._EncodeWorker(src, subs_path, out, edited_clean_subs=edited_clean_subs, edited_mute_list=edited_mute_list, threadsEncoding=threads_override)
+        # Connect progress and finished handlers before moving worker to thread
+        try:
+            self._encode_worker.progress.connect(self._on_encode_progress)
+        except Exception:
+            pass
+        self._encode_worker.finished.connect(self._on_encode_finished)
+        self._encode_worker.finished.connect(self._encode_thread.quit)
+        self._encode_thread.finished.connect(self._encode_thread.deleteLater)
+        # Pause any playback to avoid race conditions with multimedia pipeline
+        try:
+            if getattr(self, 'video_player', None):
+                try:
+                    self.video_player.pause()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._encode_worker.moveToThread(self._encode_thread)
+        self._encode_thread.started.connect(self._encode_worker.run)
+        # Show a small animated "working" indicator in the status bar
+        try:
+            self._spinner_widget = Spinner(self, diameter=16)
+            self.statusBar().addPermanentWidget(self._spinner_widget)
+            self._spinner_widget.start()
+        except Exception:
+            self._spinner_widget = None
+        # Add a progress bar to the status bar and hook it to worker progress
+        try:
+            self._progress_bar = QProgressBar(self)
+            self._progress_bar.setRange(0, 100)
+            self._progress_bar.setValue(0)
+            self.statusBar().addPermanentWidget(self._progress_bar)
+        except Exception:
+            self._progress_bar = None
+        except Exception:
+            self._progress_bar = None
+
+        # Start worker thread
+        self._encode_thread.start()
+
+    def _on_encode_finished(self, success, message):
+        try:
+            if getattr(self, '_spinner_widget', None):
+                try:
+                    self._spinner_widget.stop()
+                except Exception:
+                    pass
+                try:
+                    self.statusBar().removeWidget(self._spinner_widget)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, '_progress_bar', None):
+                try:
+                    self.statusBar().removeWidget(self._progress_bar)
+                except Exception:
+                    pass
+                self._progress_bar = None
+        except Exception:
+            pass
+        if success:
+            QMessageBox.information(self, "CleanVid", "Processing complete!")
+        else:
+            QMessageBox.critical(self, "CleanVid Error", message)
+        # Clean up temp exported subtitle file if present
+        try:
+            if getattr(self, '_temp_subs_path', None):
+                try:
+                    os.remove(self._temp_subs_path)
+                except Exception:
+                    pass
+                self._temp_subs_path = None
+        except Exception:
+            pass
+
+    def _on_encode_progress(self, payload):
+        try:
+            if not getattr(self, '_progress_bar', None):
+                return
+            percent = payload.get('percent')
+            out_time_ms = payload.get('out_time_ms', 0)
+            duration = payload.get('duration')
+            eta = payload.get('eta')
+            if percent is not None:
+                try:
+                    v = max(0, min(100, int(percent)))
+                    self._progress_bar.setValue(v)
+                    if eta is not None:
+                        # Show percent + ETA
+                        m, s = divmod(int(eta), 60)
+                        if m:
+                            eta_str = f" ETA {m}m{s}s"
+                        else:
+                            eta_str = f" ETA {s}s"
+                        try:
+                            self._progress_bar.setFormat(f"{v}%{eta_str}")
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self._progress_bar.setFormat(f"{v}%")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            else:
+                # show running time / duration if available
+                try:
+                    out_s = int(out_time_ms) // 1000
+                    if duration:
+                        try:
+                            self._progress_bar.setFormat(f"{out_s}s/{int(duration)}s")
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            self._progress_bar.setFormat(f"{out_s}s")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

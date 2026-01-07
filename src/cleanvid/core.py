@@ -57,7 +57,11 @@ def run_cleanvid(cleaner_cls, args):
         args.threadsEncoding if args.threadsEncoding is not None else args.threads,
         plexFile,
         args.plexAutoSkipId,
-        args.muteAudioIndex,
     )
+    # some callers previously passed mute index as a positional; keep behavior
+    try:
+        cleaner.muteAudioIndex = args.muteAudioIndex
+    except Exception:
+        pass
     cleaner.CreateCleanSubAndMuteList()
     cleaner.MultiplexCleanVideo()

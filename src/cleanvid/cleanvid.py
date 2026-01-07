@@ -13,7 +13,6 @@ import re
 import pysrt
 import subprocess
 import shlex
-from datetime import datetime
 from subliminal import Video, download_best_subtitles, save_subtitles
 import logging
 
@@ -44,13 +43,13 @@ def pairwise(iterable):
     return zip(a, b)
 
 
-def _run_cmd(cmd_list):
+def _run_cmd(cmd_list, progress_callback=None):
     # Delegate to ffmpeg_runner to centralize subprocess behavior and make it
     # easier to add streaming/progress support later. Keep the same return
     # shape (return_code, out, err) for backward compatibility.
     try:
         from cleanvid.ffmpeg_runner import run_cmd
-        return run_cmd(cmd_list)
+        return run_cmd(cmd_list, progress_callback=progress_callback)
     except Exception:
         # Fallback: emulate the old behaviour using subprocess directly
         try:
@@ -214,7 +213,17 @@ def GetSubtitles(vidFileSpec, srtLanguage, offline=False):
                 if not os.path.isfile(subFileSpec):
                     video = Video.fromname(vidFileSpec)
                     bestSubtitles = download_best_subtitles([video], {Language(srtLanguage)})
-                    savedSub = save_subtitles(video, [bestSubtitles[video][0]])
+                    # bestSubtitles may be empty for this video; guard against that
+                    try:
+                        entries = bestSubtitles.get(video) if isinstance(bestSubtitles, dict) else None
+                        if not entries:
+                            logger.warning('No subtitles found for %s in language %s', vidFileSpec, srtLanguage)
+                            savedSub = None
+                        else:
+                            savedSub = save_subtitles(video, [entries[0]])
+                    except Exception:
+                        logger.exception('Failed while downloading subtitles for %s', vidFileSpec)
+                        savedSub = None
 
             if subFileSpec and (not os.path.isfile(subFileSpec)):
                 subFileSpec = ""
@@ -642,7 +651,7 @@ class VidCleaner(object):
             )
 
     ######## MultiplexCleanVideo ###################################################
-    def MultiplexCleanVideo(self):
+    def MultiplexCleanVideo(self, progress_callback=None):
         # if we're don't *have* to generate a new video file, don't
         # we need to generate a video file if any of the following are true:
         # - we were explicitly asked to re-encode
@@ -761,7 +770,35 @@ class VidCleaner(object):
                 cmd += ['-threads', str(int(self.threadsEncoding))]
             cmd += [self.outputVidFileSpec]
 
-            ffmpegResult = _run_cmd(cmd)
+            # compute duration for progress reporting (if available)
+            duration = None
+            try:
+                info = GetFormatAndStreamInfo(self.inputVidFileSpec) or {}
+                duration = float((info.get('format') or {}).get('duration') or 0) or None
+            except Exception:
+                duration = None
+
+            # If caller supplied a progress_callback, use it; otherwise fall back
+            # to a simple stdout-printing progress reporter used by CLI runs.
+            def _stdout_progress_cb(d):
+                try:
+                    out_time_ms = int(d.get('out_time_ms', '0'))
+                    if duration and duration > 0:
+                        percent = int((out_time_ms / 1000.0) / duration * 100)
+                        sys.stdout.write(f"\rffmpeg: {percent}% ({out_time_ms//1000}s/{int(duration)}s)")
+                        sys.stdout.flush()
+                    else:
+                        if 'out_time_ms' in d:
+                            sys.stdout.write(f"\rffmpeg: {out_time_ms//1000}s")
+                            sys.stdout.flush()
+                except Exception:
+                    pass
+                if d.get('progress') == 'end':
+                    sys.stdout.write('\n')
+                    sys.stdout.flush()
+
+            cb = progress_callback if progress_callback is not None else _stdout_progress_cb
+            ffmpegResult = _run_cmd(cmd, progress_callback=cb)
             if (ffmpegResult.return_code != 0) or (not os.path.isfile(self.outputVidFileSpec)):
                 logger.error(' '.join(shlex.quote(x) for x in cmd))
                 logger.error(ffmpegResult.err)
