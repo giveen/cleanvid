@@ -757,6 +757,12 @@ class VidCleaner(object):
 def RunCleanvid():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        '--gpu',
+        help='Enable GPU acceleration (auto-detects and selects best encoder: NVIDIA, Intel, AMD)',
+        dest='gpu',
+        action='store_true',
+    )
+    parser.add_argument(
         '-s',
         '--subs',
         help='.srt subtitle file (will attempt auto-download if unspecified and not --offline)',
@@ -898,6 +904,7 @@ def RunCleanvid():
         reEncodeAudio=False,
         reEncodeVideo=False,
         subsOnly=False,
+        gpu=False,
     )
     args = parser.parse_args()
 
@@ -935,6 +942,43 @@ def RunCleanvid():
                 f'Content ID must be specified if creating a PlexAutoSkip JSON file (https://github.com/mdhiggins/PlexAutoSkip/wiki/Identifiers)'
             )
 
+        # GPU detection and encoder selection
+        vParams = args.vParams
+        if args.gpu:
+            import platform, subprocess
+            encoder = None
+            try:
+                # NVIDIA detection
+                nvidia_smi = shutil.which('nvidia-smi')
+                if nvidia_smi:
+                    encoder = 'h264_nvenc'
+                else:
+                    # Intel detection (VAAPI)
+                    vainfo = shutil.which('vainfo')
+                    if vainfo:
+                        # Check for VAAPI support
+                        vaapi_out = subprocess.run([vainfo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        if 'H264' in vaapi_out.stdout or 'H264' in vaapi_out.stderr:
+                            encoder = 'h264_vaapi'
+                    # AMD detection (AMF/VAAPI)
+                    if not encoder:
+                        lspci = shutil.which('lspci')
+                        if lspci:
+                            lspci_out = subprocess.run([lspci], stdout=subprocess.PIPE, text=True).stdout
+                            if 'AMD' in lspci_out or 'ATI' in lspci_out:
+                                encoder = 'h264_vaapi'  # fallback for AMD
+                if encoder:
+                    # Replace -c:v in vParams or append if missing
+                    if '-c:v' in vParams:
+                        vParams = re.sub(r'-c:v\s+\S+', f'-c:v {encoder}', vParams)
+                    else:
+                        vParams = f'-c:v {encoder} ' + vParams
+                    print(f"[cleanvid] GPU detected, using encoder: {encoder}")
+                else:
+                    print("[cleanvid] No supported GPU detected, using CPU encoding.")
+            except Exception as e:
+                print(f"[cleanvid] GPU detection failed: {e}\nFalling back to CPU encoding.")
+
         cleaner = VidCleaner(
             inFile,
             subsFile,
@@ -951,7 +995,7 @@ def RunCleanvid():
             args.reEncodeVideo,
             args.reEncodeAudio,
             args.hardCode,
-            args.vParams,
+            vParams,
             args.audioStreamIdx,
             args.aParams,
             args.aDownmix,
