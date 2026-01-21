@@ -375,6 +375,9 @@ class CleanVidGUI(QMainWindow):
         self.main_area.addWidget(self.video_widget, 10)
 
         # Playback controls with standard icons
+        # Playback controls are placed inside a persistent container widget
+        # so they can be removed from the layout and re-added later without
+        # losing signal/slot connections or widget state.
         controls_layout = QHBoxLayout()
         self.play_btn = QPushButton()
         self.play_btn.setIcon(QIcon.fromTheme("media-playback-start"))
@@ -395,7 +398,12 @@ class CleanVidGUI(QMainWindow):
         controls_layout.addWidget(self.stop_btn)
         controls_layout.addWidget(self.forward_btn)
         controls_layout.addWidget(self.seek_slider)
-        self.main_area.addLayout(controls_layout)
+        # Create a container widget so we can re-add the entire controls block
+        # to `main_area` after the subtitle editor clears the layout.
+        controls_container = QWidget()
+        controls_container.setLayout(controls_layout)
+        self.controls_widget = controls_container
+        self.main_area.addWidget(self.controls_widget)
 
         # Route playback through handler for logging and safety
         self.play_btn.clicked.connect(self.handle_play)
@@ -602,6 +610,18 @@ class CleanVidGUI(QMainWindow):
             # indexOf may not be available on some layouts; fall back safely
             if not getattr(self.video_widget, 'parent', None):
                 self.main_area.addWidget(self.video_widget)
+        # Ensure playback controls are present (re-add persistent widget)
+        try:
+            if getattr(self, 'controls_widget', None) is not None:
+                try:
+                    if self.main_area.indexOf(self.controls_widget) == -1:
+                        self.main_area.addWidget(self.controls_widget)
+                except Exception:
+                    # fallback when indexOf isn't available
+                    if not getattr(self.controls_widget, 'parent', None):
+                        self.main_area.addWidget(self.controls_widget)
+        except Exception:
+            pass
         # Recreate live subtitle frame/label if missing
         try:
             if not getattr(self, 'live_sub_label', None):
