@@ -175,41 +175,14 @@ class CleanVidGUI(QMainWindow):
         except Exception:
             pass
 
-        # Controls for recording skip ranges
-        ctrl_layout = QHBoxLayout()
-        self.start_skip_btn = QPushButton("Start Skip")
-        self.stop_skip_btn = QPushButton("Stop Skip")
-        self.clear_last_skip_btn = QPushButton("Clear Last")
-        self.clear_all_skips_btn = QPushButton("Clear All")
-        # Make buttons more visible: larger, icons, tooltips, and padding
+        # The skip controls are now placed in the toolbar and always visible.
+        # Show a small instruction label here to guide users.
         try:
-            self.start_skip_btn.setIcon(QIcon.fromTheme("media-record"))
-            self.stop_skip_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
-            self.clear_last_skip_btn.setIcon(QIcon.fromTheme("edit-undo"))
-            self.clear_all_skips_btn.setIcon(QIcon.fromTheme("edit-clear"))
+            instr = QLabel("Use toolbar buttons to record skips (Start/Stop/Clear)")
+            instr.setStyleSheet("color:#444; font-style:italic; padding:4px;")
+            self.main_area.addWidget(instr)
         except Exception:
             pass
-        for b in (self.start_skip_btn, self.stop_skip_btn, self.clear_last_skip_btn, self.clear_all_skips_btn):
-            try:
-                b.setToolTip(b.text())
-                b.setMinimumWidth(120)
-                b.setFixedHeight(34)
-                b.setStyleSheet("background:#ffffff; border:1px solid #cfcfcf; font-weight:600; padding:6px;")
-            except Exception:
-                pass
-        ctrl_layout.setSpacing(12)
-        ctrl_layout.addWidget(self.start_skip_btn)
-        ctrl_layout.addWidget(self.stop_skip_btn)
-        ctrl_layout.addWidget(self.clear_last_skip_btn)
-        ctrl_layout.addWidget(self.clear_all_skips_btn)
-        # Put controls in a framed widget for contrast
-        try:
-            ctrl_frame = QFrame()
-            ctrl_frame.setFrameShape(QFrame.Shape.StyledPanel)
-            ctrl_frame.setLayout(ctrl_layout)
-            self.main_area.addWidget(ctrl_frame)
-        except Exception:
-            self.main_area.addLayout(ctrl_layout)
 
         # Table of skip ranges
         self.skip_table = QTableWidget()
@@ -418,6 +391,47 @@ class CleanVidGUI(QMainWindow):
             toolbar.addWidget(self.threads_spin)
         except Exception:
             self.threads_spin = None
+
+        # Skip controls (always-visible toolbar buttons)
+        try:
+            self.start_skip_btn = QPushButton()
+            self.start_skip_btn.setIcon(QIcon.fromTheme("media-record"))
+            self.start_skip_btn.setToolTip("Start Skip (S)")
+            self.start_skip_btn.setFixedHeight(24)
+            self.start_skip_btn.setMinimumWidth(80)
+            toolbar.addWidget(self.start_skip_btn)
+
+            self.stop_skip_btn = QPushButton()
+            self.stop_skip_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
+            self.stop_skip_btn.setToolTip("Stop Skip (E)")
+            self.stop_skip_btn.setFixedHeight(24)
+            self.stop_skip_btn.setMinimumWidth(80)
+            toolbar.addWidget(self.stop_skip_btn)
+
+            self.clear_last_skip_btn = QPushButton()
+            self.clear_last_skip_btn.setIcon(QIcon.fromTheme("edit-undo"))
+            self.clear_last_skip_btn.setToolTip("Clear Last Skip")
+            self.clear_last_skip_btn.setFixedHeight(24)
+            self.clear_last_skip_btn.setMinimumWidth(80)
+            toolbar.addWidget(self.clear_last_skip_btn)
+
+            self.clear_all_skips_btn = QPushButton()
+            self.clear_all_skips_btn.setIcon(QIcon.fromTheme("edit-clear"))
+            self.clear_all_skips_btn.setToolTip("Clear All Skips")
+            self.clear_all_skips_btn.setFixedHeight(24)
+            self.clear_all_skips_btn.setMinimumWidth(80)
+            toolbar.addWidget(self.clear_all_skips_btn)
+
+            # wire toolbar buttons to handlers (methods are defined later)
+            try:
+                self.start_skip_btn.clicked.connect(self._on_start_skip)
+                self.stop_skip_btn.clicked.connect(self._on_stop_skip)
+                self.clear_last_skip_btn.clicked.connect(self._on_clear_last_skip)
+                self.clear_all_skips_btn.clicked.connect(self._on_clear_all_skips)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # queue feature removed
 
