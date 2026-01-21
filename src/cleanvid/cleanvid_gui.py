@@ -143,6 +143,75 @@ class CleanVidGUI(QMainWindow):
         except Exception:
             logging.debug("Failed to load subtitles on entering subtitle editor")
 
+    def show_skip_editor(self):
+        # Avoid re-adding the editor if already shown
+        if getattr(self, '_skip_editor_shown', False):
+            return
+        # Stop live subtitle updates while editing
+        try:
+            if getattr(self, '_live_connected', False):
+                self.video_player.positionChanged.disconnect(self.update_live_subtitle)
+                self._live_connected = False
+        except Exception:
+            pass
+        # Clear main area
+        try:
+            self._clear_layout(self.main_area)
+        except Exception:
+            pass
+
+        # Ensure skip ranges list exists
+        if not hasattr(self, '_skip_ranges') or self._skip_ranges is None:
+            self._skip_ranges = []
+
+        # Reuse the main video widget and controls
+        try:
+            self.main_area.addWidget(self.video_widget, 10)
+        except Exception:
+            pass
+        try:
+            if getattr(self, 'controls_widget', None) is not None:
+                self.main_area.addWidget(self.controls_widget)
+        except Exception:
+            pass
+
+        # Controls for recording skip ranges
+        ctrl_layout = QHBoxLayout()
+        self.start_skip_btn = QPushButton("Start Skip")
+        self.stop_skip_btn = QPushButton("Stop Skip")
+        self.clear_last_skip_btn = QPushButton("Clear Last")
+        self.clear_all_skips_btn = QPushButton("Clear All")
+        ctrl_layout.addWidget(self.start_skip_btn)
+        ctrl_layout.addWidget(self.stop_skip_btn)
+        ctrl_layout.addWidget(self.clear_last_skip_btn)
+        ctrl_layout.addWidget(self.clear_all_skips_btn)
+        self.main_area.addLayout(ctrl_layout)
+
+        # Table of skip ranges
+        self.skip_table = QTableWidget()
+        self.skip_table.setColumnCount(4)
+        self.skip_table.setHorizontalHeaderLabels(["Id", "Start", "End", "Duration(s)"])
+        from PySide6.QtWidgets import QHeaderView
+        header = self.skip_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.skip_table.setMaximumHeight(200)
+        self.main_area.addWidget(self.skip_table)
+
+        # Wire up buttons
+        self.start_skip_btn.clicked.connect(self._on_start_skip)
+        self.stop_skip_btn.clicked.connect(self._on_stop_skip)
+        self.clear_last_skip_btn.clicked.connect(self._on_clear_last_skip)
+        self.clear_all_skips_btn.clicked.connect(self._on_clear_all_skips)
+
+        self._skip_editor_shown = True
+        try:
+            self._refresh_skip_table()
+        except Exception:
+            pass
+
     def filter_subtitle_table(self):
         show_only_muted = self.show_only_muted_chk.isChecked()
         for row in range(self.subtitle_table.rowCount()):
@@ -300,6 +369,11 @@ class CleanVidGUI(QMainWindow):
         edit_subs_action = QAction(QIcon.fromTheme("document-edit"), "Edit Subtitles", self)
         edit_subs_action.triggered.connect(self.show_subtitle_editor)
         toolbar.addAction(edit_subs_action)
+
+        # Skip Scenes action in toolbar
+        skip_scenes_action = QAction(QIcon.fromTheme("media-skip-forward"), "Skip Scenes", self)
+        skip_scenes_action.triggered.connect(self.show_skip_editor)
+        toolbar.addAction(skip_scenes_action)
 
         # Encode / Run action in toolbar
         encode_action = QAction(QIcon.fromTheme("media-record"), "Encode", self)
@@ -479,7 +553,8 @@ class CleanVidGUI(QMainWindow):
 
     def _export_edited_table_to_temp_srt(self):
         """Export the currently-edited subtitle table to a temporary .srt and
-        return (temp_path, mute_filter_list). Returns (None, None) on failure.
+        also export any recorded skip ranges to a JSON alongside it.
+        Returns (temp_srt_path, mute_filter_list, skip_ranges) or (None, None, None) on failure.
         """
         try:
             import pysrt
@@ -490,7 +565,7 @@ class CleanVidGUI(QMainWindow):
             else:
                 srt_path = self.subs_file.text().strip() if hasattr(self, 'subs_file') else ""
             if not srt_path or not os.path.isfile(srt_path):
-                return None, None
+                return None, None, None
             orig_subs = pysrt.open(srt_path)
             new_subs = pysrt.SubRipFile()
             mute_filters = []
@@ -536,10 +611,22 @@ class CleanVidGUI(QMainWindow):
             tmp_path = tmp.name
             tmp.close()
             new_subs.save(tmp_path)
-            return tmp_path, mute_filters
+            # Export skip ranges (if any) to a JSON file next to the temp SRT
+            skip_ranges = getattr(self, '_skip_ranges', []) or []
+            try:
+                import json
+                skips_path = os.path.splitext(tmp_path)[0] + '_skips.json'
+                with open(skips_path, 'w') as sf:
+                    json.dump(skip_ranges, sf)
+                # store path for cleanup
+                self._temp_skips_path = skips_path
+            except Exception:
+                # ignore JSON export failures
+                self._temp_skips_path = None
+            return tmp_path, mute_filters, skip_ranges
         except Exception:
             logging.exception("Failed to export edited subtitle table to temp srt")
-            return None, None
+            return None, None, None
 
     def _clear_layout(self, layout):
         """Recursively remove all items from a QLayout, including nested layouts and widgets.
@@ -558,6 +645,81 @@ class CleanVidGUI(QMainWindow):
                     child = item.layout()
                     if child is not None:
                         self._clear_layout(child)
+        except Exception:
+            pass
+
+    def _ms_to_timestr(self, ms):
+        try:
+            s = int(ms // 1000)
+            ms_r = int(ms % 1000)
+            h, r = divmod(s, 3600)
+            m, sec = divmod(r, 60)
+            return f"{h:02d}:{m:02d}:{sec:02d}.{ms_r:03d}"
+        except Exception:
+            return "00:00:00.000"
+
+    def _on_start_skip(self):
+        # Record current player position as start (ms)
+        try:
+            pos = int(self.video_player.position())
+            self._current_skip_start = pos
+        except Exception:
+            self._current_skip_start = None
+
+    def _on_stop_skip(self):
+        # Record current player position as end and append range
+        try:
+            end = int(self.video_player.position())
+            start = getattr(self, '_current_skip_start', None)
+            if start is None:
+                return
+            if end <= start:
+                return
+            # ensure skip ranges list
+            if not hasattr(self, '_skip_ranges') or self._skip_ranges is None:
+                self._skip_ranges = []
+            # ensure id counter
+            if not hasattr(self, '_skip_next_id'):
+                self._skip_next_id = 1
+            rid = self._skip_next_id
+            self._skip_next_id += 1
+            rng = {"id": rid, "start_ms": start, "end_ms": end, "created_at": time.time()}
+            self._skip_ranges.append(rng)
+            # clear current start
+            self._current_skip_start = None
+            self._refresh_skip_table()
+        except Exception:
+            logging.exception("Failed to record skip range")
+
+    def _on_clear_last_skip(self):
+        try:
+            if getattr(self, '_skip_ranges', None):
+                self._skip_ranges.pop()
+                self._refresh_skip_table()
+        except Exception:
+            pass
+
+    def _on_clear_all_skips(self):
+        try:
+            self._skip_ranges = []
+            self._refresh_skip_table()
+        except Exception:
+            pass
+
+    def _refresh_skip_table(self):
+        try:
+            rows = getattr(self, '_skip_ranges', []) or []
+            self.skip_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                sid = QTableWidgetItem(str(r.get('id')))
+                start_it = QTableWidgetItem(self._ms_to_timestr(r.get('start_ms', 0)))
+                end_it = QTableWidgetItem(self._ms_to_timestr(r.get('end_ms', 0)))
+                dur_s = (r.get('end_ms', 0) - r.get('start_ms', 0)) / 1000.0
+                dur_it = QTableWidgetItem(f"{dur_s:.3f}")
+                self.skip_table.setItem(i, 0, sid)
+                self.skip_table.setItem(i, 1, start_it)
+                self.skip_table.setItem(i, 2, end_it)
+                self.skip_table.setItem(i, 3, dur_it)
         except Exception:
             pass
 
@@ -601,14 +763,30 @@ class CleanVidGUI(QMainWindow):
             # the live preview and subsequent processing use the edited text.
             try:
                 if getattr(self, '_subtitle_editor_shown', False) and hasattr(self, 'subtitle_table') and (self.subtitle_table.rowCount() > 0):
-                    edited_clean_subs, edited_mute_list = self._export_edited_table_to_temp_srt()
+                    edited_clean_subs, edited_mute_list, edited_skip_ranges = self._export_edited_table_to_temp_srt()
                     if edited_clean_subs:
                         self._temp_subs_path = edited_clean_subs
+                        self._temp_skips = edited_skip_ranges
                         # Reload live subtitles from the exported temp file immediately
                         try:
                             self.load_subtitles_for_live()
                         except Exception:
                             pass
+            except Exception:
+                pass
+            # If skip editor was open, export skip ranges to a temp JSON so
+            # they are available for preview/encode even if subtitles weren't edited.
+            try:
+                if getattr(self, '_skip_editor_shown', False) and getattr(self, '_skip_ranges', None):
+                    import json
+                    tmp_sk = tempfile.NamedTemporaryFile(delete=False, suffix='_skips.json', prefix='cleanvid_skips_')
+                    try:
+                        tmp_sk.write(json.dumps(self._skip_ranges).encode('utf-8'))
+                        tmp_sk_path = tmp_sk.name
+                    finally:
+                        tmp_sk.close()
+                    self._temp_skips_path = tmp_sk_path
+                    self._temp_skips = list(self._skip_ranges)
             except Exception:
                 pass
             # Clear reference to live_sub_label so we can reliably recreate it
@@ -662,6 +840,10 @@ class CleanVidGUI(QMainWindow):
         # Reset subtitle editor shown flag
         try:
             self._subtitle_editor_shown = False
+            try:
+                self._skip_editor_shown = False
+            except Exception:
+                pass
         except Exception:
             pass
         # Reconnect live subtitle updates (avoid multiple connects)
@@ -1133,12 +1315,14 @@ class CleanVidGUI(QMainWindow):
         # If the user has an edited subtitle table, export it to a temp .srt
         edited_clean_subs = None
         edited_mute_list = None
+        edited_skip_ranges = None
         try:
             if hasattr(self, 'subtitle_table') and (self.subtitle_table.rowCount() > 0):
-                edited_clean_subs, edited_mute_list = self._export_edited_table_to_temp_srt()
+                edited_clean_subs, edited_mute_list, edited_skip_ranges = self._export_edited_table_to_temp_srt()
                 # remember temp path for cleanup later
                 if edited_clean_subs:
                     self._temp_subs_path = edited_clean_subs
+                    self._temp_skips = edited_skip_ranges
         except Exception:
             edited_clean_subs = None
             edited_mute_list = None
