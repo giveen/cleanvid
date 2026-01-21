@@ -464,7 +464,12 @@ class CleanVidGUI(QMainWindow):
 
     def load_subtitles_for_live(self):
         import pysrt
-        srt_path = self.subs_file.text().strip()
+        # Prefer an exported temporary subs file (from the editor) when present
+        tmp = getattr(self, '_temp_subs_path', None)
+        if tmp and os.path.isfile(tmp):
+            srt_path = tmp
+        else:
+            srt_path = self.subs_file.text().strip()
         self.live_subs = []
         if srt_path and os.path.isfile(srt_path):
             subs = pysrt.open(srt_path)
@@ -592,6 +597,20 @@ class CleanVidGUI(QMainWindow):
     def show_main_view(self):
         # Clear non-video widgets from main area and show main controls
         try:
+            # If an edited subtitle table was open, export it to a temp SRT so
+            # the live preview and subsequent processing use the edited text.
+            try:
+                if getattr(self, '_subtitle_editor_shown', False) and hasattr(self, 'subtitle_table') and (self.subtitle_table.rowCount() > 0):
+                    edited_clean_subs, edited_mute_list = self._export_edited_table_to_temp_srt()
+                    if edited_clean_subs:
+                        self._temp_subs_path = edited_clean_subs
+                        # Reload live subtitles from the exported temp file immediately
+                        try:
+                            self.load_subtitles_for_live()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             # Clear reference to live_sub_label so we can reliably recreate it
             try:
                 self.live_sub_label = None
