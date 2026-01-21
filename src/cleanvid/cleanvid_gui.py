@@ -181,11 +181,35 @@ class CleanVidGUI(QMainWindow):
         self.stop_skip_btn = QPushButton("Stop Skip")
         self.clear_last_skip_btn = QPushButton("Clear Last")
         self.clear_all_skips_btn = QPushButton("Clear All")
+        # Make buttons more visible: larger, icons, tooltips, and padding
+        try:
+            self.start_skip_btn.setIcon(QIcon.fromTheme("media-record"))
+            self.stop_skip_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
+            self.clear_last_skip_btn.setIcon(QIcon.fromTheme("edit-undo"))
+            self.clear_all_skips_btn.setIcon(QIcon.fromTheme("edit-clear"))
+        except Exception:
+            pass
+        for b in (self.start_skip_btn, self.stop_skip_btn, self.clear_last_skip_btn, self.clear_all_skips_btn):
+            try:
+                b.setToolTip(b.text())
+                b.setMinimumWidth(120)
+                b.setFixedHeight(34)
+                b.setStyleSheet("background:#ffffff; border:1px solid #cfcfcf; font-weight:600; padding:6px;")
+            except Exception:
+                pass
+        ctrl_layout.setSpacing(12)
         ctrl_layout.addWidget(self.start_skip_btn)
         ctrl_layout.addWidget(self.stop_skip_btn)
         ctrl_layout.addWidget(self.clear_last_skip_btn)
         ctrl_layout.addWidget(self.clear_all_skips_btn)
-        self.main_area.addLayout(ctrl_layout)
+        # Put controls in a framed widget for contrast
+        try:
+            ctrl_frame = QFrame()
+            ctrl_frame.setFrameShape(QFrame.Shape.StyledPanel)
+            ctrl_frame.setLayout(ctrl_layout)
+            self.main_area.addWidget(ctrl_frame)
+        except Exception:
+            self.main_area.addLayout(ctrl_layout)
 
         # Table of skip ranges
         self.skip_table = QTableWidget()
