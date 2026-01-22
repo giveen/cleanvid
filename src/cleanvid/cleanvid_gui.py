@@ -65,11 +65,51 @@ import time
 import traceback
 import logging
 import tempfile
+import re
+import shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cleanvid import VidCleaner, SUBTITLE_DEFAULT_LANG, VIDEO_DEFAULT_PARAMS, AUDIO_DEFAULT_PARAMS
 
 
 class CleanVidGUI(QMainWindow):
+
+    def _apply_gpu_encoder(self, vParams: str) -> str:
+        """Detect a supported GPU encoder and return updated vParams string.
+        Falls back to the provided `vParams` if no GPU encoder is available.
+        """
+        try:
+            import shutil as _shutil, subprocess as _sub
+            encoder = None
+            if _shutil.which('nvidia-smi'):
+                encoder = 'h264_nvenc'
+            else:
+                if _shutil.which('vainfo'):
+                    try:
+                        out = _sub.run(['vainfo'], stdout=_sub.PIPE, stderr=_sub.PIPE, text=True)
+                        if 'H264' in (out.stdout or '') or 'H264' in (out.stderr or ''):
+                            encoder = 'h264_vaapi'
+                    except Exception:
+                        pass
+                if not encoder and _shutil.which('lspci'):
+                    try:
+                        lsp = _sub.run(['lspci'], stdout=_sub.PIPE, text=True).stdout
+                        if 'AMD' in lsp or 'ATI' in lsp:
+                            encoder = 'h264_vaapi'
+                    except Exception:
+                        pass
+            if encoder:
+                try:
+                    if '-c:v' in vParams:
+                        vParams = re.sub(r'-c:v\s+\S+', f'-c:v {encoder}', vParams)
+                    else:
+                        vParams = f'-c:v {encoder} ' + vParams
+                    logging.info('Using GPU encoder: %s', encoder)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return vParams
+
 
     def handle_play(self):
         logging.info("Play button pressed")
@@ -84,6 +124,17 @@ class CleanVidGUI(QMainWindow):
         # Avoid re-adding the editor if already shown
         if getattr(self, '_subtitle_editor_shown', False):
             return
+        # ensure skip controls hidden while editing subtitles
+        try:
+            self._set_skip_controls_visible(False)
+        except Exception:
+            pass
+        try:
+            tc = getattr(self, 'transport_container', None)
+            if tc is not None:
+                tc.setVisible(False)
+        except Exception:
+            pass
         # Stop live subtitle updates while editing (guard against deleted widgets)
         try:
             if getattr(self, '_live_connected', False):
@@ -143,28 +194,55 @@ class CleanVidGUI(QMainWindow):
         except Exception:
             logging.debug("Failed to load subtitles on entering subtitle editor")
 
+    def _open_subtitle_editor_from_menu(self):
+        """Menu wrapper to force opening the subtitle editor even if flags might be stale."""
+        try:
+            self._subtitle_editor_shown = False
+        except Exception:
+            pass
+        self.show_subtitle_editor()
+
     def show_skip_editor(self):
-        # Avoid re-adding the editor if already shown
+        # Show the Skip Scenes editor with video preview and transport controls
         if getattr(self, '_skip_editor_shown', False):
             return
-        # Stop live subtitle updates while editing
+        # stop live subtitle updates while editing
         try:
             if getattr(self, '_live_connected', False):
                 self.video_player.positionChanged.disconnect(self.update_live_subtitle)
                 self._live_connected = False
         except Exception:
             pass
-        # Clear main area
+
+        # Debug: report controls_widget / buttons state
+        try:
+            logging.info("show_skip_editor: controls_widget=%s parent=%s visible=%s",
+                         getattr(self, 'controls_widget', None),
+                         getattr(getattr(self, 'controls_widget', None), 'parent', None),
+                         getattr(getattr(self, 'controls_widget', None), 'isVisible', lambda: None)())
+            for btn_name in ('play_btn','pause_btn','stop_btn','backward_btn','forward_btn','seek_slider','start_skip_btn','stop_skip_btn','clear_last_skip_btn','clear_all_skips_btn'):
+                btn = getattr(self, btn_name, None)
+                if btn is None:
+                    logging.info("show_skip_editor: %s = None", btn_name)
+                else:
+                    try:
+                        logging.info("show_skip_editor: %s visible=%s parent=%s text=%s", btn_name, getattr(btn, 'isVisible', lambda: None)(), getattr(btn, 'parent', None), getattr(btn, 'text', lambda: '')())
+                    except Exception:
+                        logging.info("show_skip_editor: %s present (no further info)", btn_name)
+        except Exception:
+            pass
+
+        # clear main area
         try:
             self._clear_layout(self.main_area)
         except Exception:
             pass
 
-        # Ensure skip ranges list exists
+        # ensure skip ranges list
         if not hasattr(self, '_skip_ranges') or self._skip_ranges is None:
             self._skip_ranges = []
 
-        # Reuse the main video widget and controls
+        # add video preview and controls
         try:
             self.main_area.addWidget(self.video_widget, 10)
         except Exception:
@@ -174,36 +252,70 @@ class CleanVidGUI(QMainWindow):
                 self.main_area.addWidget(self.controls_widget)
         except Exception:
             pass
-
-        # The skip controls are now placed in the toolbar and always visible.
-        # Show a small instruction label here to guide users.
+        # Ensure transport container (parent for transport & skip buttons) is present
         try:
-            instr = QLabel("Use toolbar buttons to record skips (Start/Stop/Clear)")
+            tc = getattr(self, 'transport_container', None)
+            if tc is not None:
+                try:
+                    # If it's not parented, add it into the main_area (do not move it out)
+                    if tc.parent() is None:
+                        self.main_area.addWidget(tc)
+                except Exception:
+                    pass
+                try:
+                    tc.setVisible(True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # small instruction label
+        try:
+            instr = QLabel("Use transport buttons to position and toolbar to record skips")
             instr.setStyleSheet("color:#444; font-style:italic; padding:4px;")
             self.main_area.addWidget(instr)
         except Exception:
             pass
 
-        # Table of skip ranges
-        self.skip_table = QTableWidget()
-        self.skip_table.setColumnCount(4)
-        self.skip_table.setHorizontalHeaderLabels(["Id", "Start", "End", "Duration(s)"])
-        from PySide6.QtWidgets import QHeaderView
-        header = self.skip_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.skip_table.setMaximumHeight(200)
-        self.main_area.addWidget(self.skip_table)
+        # skip table
+        try:
+            self.skip_table = QTableWidget()
+            self.skip_table.setColumnCount(4)
+            self.skip_table.setHorizontalHeaderLabels(["Id", "Start", "End", "Duration(s)"])
+            from PySide6.QtWidgets import QHeaderView
+            header = self.skip_table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            self.skip_table.setMaximumHeight(200)
+            self.main_area.addWidget(self.skip_table)
+        except Exception:
+            pass
 
-        # Wire up buttons
-        self.start_skip_btn.clicked.connect(self._on_start_skip)
-        self.stop_skip_btn.clicked.connect(self._on_stop_skip)
-        self.clear_last_skip_btn.clicked.connect(self._on_clear_last_skip)
-        self.clear_all_skips_btn.clicked.connect(self._on_clear_all_skips)
+        # show skip controls (widgets/signals wired once in init_ui)
+        try:
+            self._set_skip_controls_visible(True)
+        except Exception:
+            pass
 
         self._skip_editor_shown = True
+        try:
+            self._refresh_skip_table()
+        except Exception:
+            pass
+    def _open_skip_editor_from_menu(self):
+        """Menu wrapper to force opening the skip editor."""
+        try:
+            self._skip_editor_shown = False
+        except Exception:
+            pass
+        self.show_skip_editor()
+        # show_skip_editor handles wiring and visibility; no duplicate connects
+        try:
+            self._set_skip_controls_visible(True)
+        except Exception:
+            pass
         try:
             self._refresh_skip_table()
         except Exception:
@@ -362,21 +474,29 @@ class CleanVidGUI(QMainWindow):
         open_action.triggered.connect(self.open_source)
         toolbar.addAction(open_action)
 
-        # Edit Subtitles action in toolbar
+        # Edit Subtitles action (placed into Tools menu below)
         edit_subs_action = QAction(QIcon.fromTheme("document-edit"), "Edit Subtitles", self)
-        edit_subs_action.triggered.connect(self.show_subtitle_editor)
-        toolbar.addAction(edit_subs_action)
+        # use a safe menu entry that forces the editor open
+        edit_subs_action.triggered.connect(self._open_subtitle_editor_from_menu)
 
-        # Skip Scenes action in toolbar
+        # Skip Scenes action (placed into Tools menu below)
         skip_scenes_action = QAction(QIcon.fromTheme("media-skip-forward"), "Skip Scenes", self)
-        skip_scenes_action.triggered.connect(self.show_skip_editor)
-        toolbar.addAction(skip_scenes_action)
+        skip_scenes_action.triggered.connect(self._open_skip_editor_from_menu)
 
         # Encode / Run action in toolbar
         encode_action = QAction(QIcon.fromTheme("media-record"), "Encode", self)
         encode_action.setToolTip("Run CleanVid to process the current source/output settings")
         encode_action.triggered.connect(self.start_encode_with_estimate)
         toolbar.addAction(encode_action)
+
+        # Also expose Edit/Skip actions in a top-level "Tools" menu for discoverability
+        try:
+            menubar = self.menuBar()
+            tools_menu = menubar.addMenu("Tools")
+            tools_menu.addAction(edit_subs_action)
+            tools_menu.addAction(skip_scenes_action)
+        except Exception:
+            pass
 
         # Threads override control (small spinbox) so users can set encoding threads
         try:
@@ -399,29 +519,36 @@ class CleanVidGUI(QMainWindow):
             self.start_skip_btn.setToolTip("Start Skip (S)")
             self.start_skip_btn.setFixedHeight(24)
             self.start_skip_btn.setMinimumWidth(80)
-            toolbar.addWidget(self.start_skip_btn)
+            self.start_skip_btn.setVisible(False)
 
             self.stop_skip_btn = QPushButton()
             self.stop_skip_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
             self.stop_skip_btn.setToolTip("Stop Skip (E)")
             self.stop_skip_btn.setFixedHeight(24)
             self.stop_skip_btn.setMinimumWidth(80)
-            toolbar.addWidget(self.stop_skip_btn)
+            self.stop_skip_btn.setVisible(False)
 
             self.clear_last_skip_btn = QPushButton()
             self.clear_last_skip_btn.setIcon(QIcon.fromTheme("edit-undo"))
             self.clear_last_skip_btn.setToolTip("Clear Last Skip")
             self.clear_last_skip_btn.setFixedHeight(24)
             self.clear_last_skip_btn.setMinimumWidth(80)
-            toolbar.addWidget(self.clear_last_skip_btn)
+            self.clear_last_skip_btn.setVisible(False)
 
             self.clear_all_skips_btn = QPushButton()
             self.clear_all_skips_btn.setIcon(QIcon.fromTheme("edit-clear"))
             self.clear_all_skips_btn.setToolTip("Clear All Skips")
             self.clear_all_skips_btn.setFixedHeight(24)
             self.clear_all_skips_btn.setMinimumWidth(80)
-            toolbar.addWidget(self.clear_all_skips_btn)
-
+            self.clear_all_skips_btn.setVisible(False)
+            # Provide fallback text so buttons remain visible if icon theme is missing
+            try:
+                self.start_skip_btn.setText("Start")
+                self.stop_skip_btn.setText("Stop")
+                self.clear_last_skip_btn.setText("Undo")
+                self.clear_all_skips_btn.setText("Clear")
+            except Exception:
+                pass
             # wire toolbar buttons to handlers (methods are defined later)
             try:
                 self.start_skip_btn.clicked.connect(self._on_start_skip)
@@ -504,18 +631,40 @@ class CleanVidGUI(QMainWindow):
         self.seek_slider = QSlider(Qt.Orientation.Horizontal)
         self.seek_slider.setMinimum(0)
         self.seek_slider.setMaximum(100)
-        controls_layout.addWidget(self.backward_btn)
-        controls_layout.addWidget(self.play_btn)
-        controls_layout.addWidget(self.pause_btn)
-        controls_layout.addWidget(self.stop_btn)
-        controls_layout.addWidget(self.forward_btn)
-        controls_layout.addWidget(self.seek_slider)
         # Create a container widget so we can re-add the entire controls block
         # to `main_area` after the subtitle editor clears the layout.
         controls_container = QWidget()
         controls_container.setLayout(controls_layout)
         self.controls_widget = controls_container
+        try:
+            self.controls_widget.setMinimumHeight(40)
+            self.controls_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        except Exception:
+            pass
         self.main_area.addWidget(self.controls_widget)
+
+        # Transport + skip container (parent for all transport & skip buttons).
+        # Buttons are created above; add them to this container so they have a parent
+        # and can be shown/hidden as a single unit when opening the Skip Editor.
+        try:
+            self.transport_container = QWidget()
+            self.transport_layout = QHBoxLayout()
+            self.transport_container.setLayout(self.transport_layout)
+            for _btn in (self.backward_btn, self.play_btn, self.pause_btn, self.stop_btn, self.forward_btn,
+                         self.start_skip_btn, self.stop_skip_btn, self.clear_last_skip_btn, self.clear_all_skips_btn,
+                         self.seek_slider):
+                try:
+                    if _btn is not None:
+                        self.transport_layout.addWidget(_btn)
+                except Exception:
+                    pass
+            # hidden by default; show when Skip Editor is opened
+            try:
+                self.transport_container.setVisible(False)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # Route playback through handler for logging and safety
         self.play_btn.clicked.connect(self.handle_play)
@@ -672,13 +821,29 @@ class CleanVidGUI(QMainWindow):
         controls when switching views.
         """
         try:
-            while layout.count():
-                item = layout.takeAt(0)
+            # Iterate in reverse so removing items doesn't change indexes
+            for i in reversed(range(layout.count())):
+                item = layout.itemAt(i)
                 if item is None:
                     continue
-                w = item.widget()
-                if w is not None:
-                    w.setParent(None)
+                widget = item.widget()
+                # Do NOT remove the transport container; keep it parented in main_area
+                try:
+                    if widget is getattr(self, 'transport_container', None):
+                        continue
+                except Exception:
+                    pass
+
+                # Remove the item from the layout and delete its widget if present
+                try:
+                    layout.removeItem(item)
+                except Exception:
+                    pass
+                if widget is not None:
+                    try:
+                        widget.setParent(None)
+                    except Exception:
+                        pass
                 else:
                     child = item.layout()
                     if child is not None:
@@ -695,6 +860,29 @@ class CleanVidGUI(QMainWindow):
             return f"{h:02d}:{m:02d}:{sec:02d}.{ms_r:03d}"
         except Exception:
             return "00:00:00.000"
+
+    def _set_skip_controls_visible(self, visible: bool):
+        """Show or hide the inline skip control buttons safely."""
+        try:
+            for b in ('start_skip_btn', 'stop_skip_btn', 'clear_last_skip_btn', 'clear_all_skips_btn'):
+                btn = getattr(self, b, None)
+                if btn is not None:
+                    try:
+                        btn.setVisible(bool(visible))
+                    except Exception:
+                        pass
+            # Also toggle the transport container visibility if present
+            try:
+                tc = getattr(self, 'transport_container', None)
+                if tc is not None:
+                    try:
+                        tc.setVisible(bool(visible))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _on_start_skip(self):
         # Record current player position as start (ms)
@@ -825,6 +1013,17 @@ class CleanVidGUI(QMainWindow):
                         tmp_sk.close()
                     self._temp_skips_path = tmp_sk_path
                     self._temp_skips = list(self._skip_ranges)
+            except Exception:
+                pass
+            # hide skip controls when returning to main view
+            try:
+                self._set_skip_controls_visible(False)
+            except Exception:
+                pass
+            try:
+                tc = getattr(self, 'transport_container', None)
+                if tc is not None:
+                    tc.setVisible(False)
             except Exception:
                 pass
             # Clear reference to live_sub_label so we can reliably recreate it
@@ -1005,29 +1204,36 @@ class CleanVidGUI(QMainWindow):
         main_layout = QtWidgets.QVBoxLayout(central)
 
         # Source and Preset
-        source_layout = QHBoxLayout()
-        source_label = QLabel("Source:")
-        self.source_file = QLineEdit()
-        open_btn = QPushButton("Open Source")
-        open_btn.clicked.connect(self.open_source)
-        source_layout.addWidget(source_label)
-        source_layout.addWidget(self.source_file)
-        source_layout.addWidget(open_btn)
-        source_layout.addStretch()
-        main_layout.addLayout(source_layout)
-
-        preset_layout = QHBoxLayout()
-        preset_label = QLabel("Preset:")
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItems([
-            "Official > General > Fast 1080p30",
-            "Official > General > Fast 720p30",
-            "Custom"
-        ])
-        preset_layout.addWidget(preset_label)
-        preset_layout.addWidget(self.preset_combo)
-        preset_layout.addStretch()
-        main_layout.addLayout(preset_layout)
+        controls_layout = QHBoxLayout()
+        # Create transport buttons here; they will be parented into
+        # `transport_container` so they render when the Skip Editor is shown.
+        self.play_btn = QPushButton()
+        self.play_btn.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.pause_btn = QPushButton()
+        self.pause_btn.setIcon(QIcon.fromTheme("media-playback-pause"))
+        self.stop_btn = QPushButton()
+        self.stop_btn.setIcon(QIcon.fromTheme("media-playback-stop"))
+        self.backward_btn = QPushButton()
+        self.backward_btn.setIcon(QIcon.fromTheme("media-seek-backward"))
+        self.forward_btn = QPushButton()
+        self.forward_btn.setIcon(QIcon.fromTheme("media-seek-forward"))
+        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider.setMinimum(0)
+        self.seek_slider.setMaximum(100)
+        # Ensure preset combo and layout exist (might be missing after edits)
+        try:
+            preset_layout = QHBoxLayout()
+            self.preset_combo = QComboBox()
+            # Populate with a sensible default entry
+            try:
+                self.preset_combo.addItems(["Default"])
+            except Exception:
+                pass
+            preset_layout.addWidget(self.preset_combo)
+            preset_layout.addStretch()
+            main_layout.addLayout(preset_layout)
+        except Exception:
+            pass
 
         # Tabs
         tabs = QTabWidget()
@@ -1147,39 +1353,9 @@ class CleanVidGUI(QMainWindow):
         if not src or not out:
             QMessageBox.warning(self, "CleanVid", "Please select both input and output files.")
             return
-        try:
-            cleaner = VidCleaner(
-                src,
-                subs,
-                out,
-                subsOut,
-                swears,
-                pad,
-                            threadsEncoding,
-                embedSubs,
-                fullSubs,
-                subsOnly,
-                edl,
-                jsonDump,
-                lang,
-                reEncodeVideo,
-                reEncodeAudio,
-                hardCode,
-                vParams,
-                audioStreamIdx,
-                aParams,
-                aDownmix,
-                threadsInput,
-                    max(1, (os.cpu_count() or 1) - 2),  # Set default threadsEncoding to all but 2 cores
-                plexAutoSkipJson,
-                plexAutoSkipId,
-            )
-            cleaner.CreateCleanSubAndMuteList()
-            cleaner.MultiplexCleanVideo()
-            QMessageBox.information(self, "CleanVid", "Processing complete!")
-        except Exception as e:
-            tb = traceback.format_exc()
-            QMessageBox.critical(self, "CleanVid Error", f"Error: {e}\n\n{tb}")
+        # (Encoding is handled by the background worker; this synchronous
+        # block was removed to avoid duplicating work and to fix an accidental
+        # insertion that broke the call signature.)
 
     # ----- Background encode worker and progress estimation -----
     class _EncodeWorker(QObject):
@@ -1187,7 +1363,7 @@ class CleanVidGUI(QMainWindow):
         # emits a dict with keys like 'percent', 'out_time_ms', 'duration', 'eta'
         progress = Signal(dict)
 
-        def __init__(self, src, subs, out, edited_clean_subs=None, edited_mute_list=None, threadsEncoding=None, parent=None):
+        def __init__(self, src, subs, out, edited_clean_subs=None, edited_mute_list=None, skip_ranges=None, vParams=None, threadsEncoding=None, parent=None):
             super().__init__(parent)
             self.src = src
             self.subs = subs
@@ -1195,6 +1371,10 @@ class CleanVidGUI(QMainWindow):
             # If provided, these are the GUI-exported cleaned subtitle file and precomputed mute filters.
             self.edited_clean_subs = edited_clean_subs
             self.edited_mute_list = edited_mute_list or []
+            # Optional skip ranges (list of dicts with start_ms/end_ms)
+            self.skip_ranges = skip_ranges or []
+            # Optional video params string (may include GPU encoder)
+            self.vParams = vParams
             # Optional override for ffmpeg encoding threads
             self.threadsEncoding = threadsEncoding
 
@@ -1218,7 +1398,7 @@ class CleanVidGUI(QMainWindow):
                 reEncodeVideo = False
                 reEncodeAudio = False
                 hardCode = False
-                vParams = VIDEO_DEFAULT_PARAMS
+                vParams = self.vParams if getattr(self, 'vParams', None) else VIDEO_DEFAULT_PARAMS
                 audioStreamIdx = None
                 aParams = AUDIO_DEFAULT_PARAMS
                 aDownmix = False
@@ -1228,6 +1408,142 @@ class CleanVidGUI(QMainWindow):
                 plexAutoSkipJson = ""
                 plexAutoSkipId = ""
                 subsOut = ""
+                # If skip ranges were provided, trim the source into a temporary concatenated file
+                try:
+                    if getattr(self, 'skip_ranges', None):
+                        import subprocess, shlex
+                        dbg_log = None
+                        try:
+                            dbg_log = os.path.join(tempfile.gettempdir(), 'cleanvid_skip_debug.log')
+                            with open(dbg_log, 'a') as _dbg:
+                                _dbg.write('\n=== skip trim start: %s ===\n' % time.strftime('%Y-%m-%d %H:%M:%S'))
+                        except Exception:
+                            dbg_log = None
+
+                        # Probe duration if available
+                        dur = None
+                        try:
+                            from cleanvid.cleanvid import GetFormatAndStreamInfo
+                            info = GetFormatAndStreamInfo(self.src) or {}
+                            dur = float((info.get('format') or {}).get('duration') or 0) or None
+                        except Exception:
+                            dur = None
+
+                        skips = sorted(self.skip_ranges, key=lambda x: x.get('start_ms', 0))
+                        kept = []
+                        last = 0
+                        for s in skips:
+                            st = int(s.get('start_ms', 0))
+                            if st > last:
+                                kept.append((last / 1000.0, st / 1000.0))
+                            last = int(s.get('end_ms', last))
+                        if dur is not None and last < int(dur * 1000):
+                            kept.append((last / 1000.0, dur))
+                        if (not kept) and skips:
+                            kept = [(skips[-1].get('end_ms', 0) / 1000.0, None)]
+
+                        if kept:
+                            # helper to format seconds to hh:mm:ss.mmm
+                            def _fmt(t):
+                                try:
+                                    t = float(t)
+                                    h = int(t // 3600)
+                                    m = int((t % 3600) // 60)
+                                    s = t % 60
+                                    return f"{h:02d}:{m:02d}:{s:06.3f}"
+                                except Exception:
+                                    return str(t)
+
+                            tmpdir = tempfile.mkdtemp(prefix='cleanvid_skips_')
+                            parts = []
+                            failed = False
+                            for i, (ks, ke) in enumerate(kept):
+                                part = os.path.join(tmpdir, f'part_{i}.mp4')
+                                if ke is None:
+                                    cmd = ['ffmpeg', '-y', '-ss', _fmt(ks), '-i', self.src, '-c', 'copy', part]
+                                else:
+                                    cmd = ['ffmpeg', '-y', '-ss', _fmt(ks), '-to', _fmt(ke), '-i', self.src, '-c', 'copy', part]
+                                try:
+                                    try:
+                                        if dbg_log:
+                                            with open(dbg_log, 'a') as _dbg:
+                                                _dbg.write('RUN CMD: %s\n' % (' '.join(shlex.quote(x) for x in cmd)))
+                                    except Exception:
+                                        pass
+                                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                    try:
+                                        if dbg_log:
+                                            with open(dbg_log, 'a') as _dbg:
+                                                _dbg.write('RET: %s\nSTDERR:\n%s\nSTDOUT:\n%s\n' % (p.returncode, p.stderr.decode('utf-8', 'replace') if isinstance(p.stderr, (bytes, bytearray)) else p.stderr, p.stdout.decode('utf-8', 'replace') if isinstance(p.stdout, (bytes, bytearray)) else p.stdout))
+                                    except Exception:
+                                        pass
+                                    if p.returncode != 0 or not os.path.isfile(part):
+                                        # fallback: re-encode with -ss/-to before -i
+                                        if ke is None:
+                                            cmd2 = ['ffmpeg', '-y', '-ss', _fmt(ks), '-i', self.src, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', part]
+                                        else:
+                                            cmd2 = ['ffmpeg', '-y', '-ss', _fmt(ks), '-to', _fmt(ke), '-i', self.src, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', part]
+                                        try:
+                                            if dbg_log:
+                                                with open(dbg_log, 'a') as _dbg:
+                                                    _dbg.write('FALLBACK CMD: %s\n' % (' '.join(shlex.quote(x) for x in cmd2)))
+                                        except Exception:
+                                            pass
+                                        p = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                        try:
+                                            if dbg_log:
+                                                with open(dbg_log, 'a') as _dbg:
+                                                    _dbg.write('FALLBACK RET: %s\nSTDERR:\n%s\nSTDOUT:\n%s\n' % (p.returncode, p.stderr.decode('utf-8', 'replace') if isinstance(p.stderr, (bytes, bytearray)) else p.stderr, p.stdout.decode('utf-8', 'replace') if isinstance(p.stdout, (bytes, bytearray)) else p.stdout))
+                                        except Exception:
+                                            pass
+                                        if p.returncode != 0 or not os.path.isfile(part):
+                                            failed = True
+                                            break
+                                    parts.append(part)
+                                except Exception as e:
+                                    try:
+                                        if dbg_log:
+                                            with open(dbg_log, 'a') as _dbg:
+                                                _dbg.write('EXC during segment create: %s\n' % str(e))
+                                    except Exception:
+                                        pass
+                                    failed = True
+                                    break
+                            if not failed and parts:
+                                listfile = os.path.join(tmpdir, 'list.txt')
+                                with open(listfile, 'w') as lf:
+                                    for p in parts:
+                                        lf.write(f"file '{p}'\n")
+                                out_tmp = os.path.join(tempfile.gettempdir(), f'cleanvid_skipped_{int(time.time())}.mp4')
+                                cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', listfile, '-c', 'copy', out_tmp]
+                                p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                try:
+                                    if dbg_log:
+                                        with open(dbg_log, 'a') as _dbg:
+                                            _dbg.write('CONCAT RET: %s\nSTDERR:\n%s\nSTDOUT:\n%s\n' % (p.returncode, p.stderr.decode('utf-8', 'replace') if isinstance(p.stderr, (bytes, bytearray)) else p.stderr, p.stdout.decode('utf-8', 'replace') if isinstance(p.stdout, (bytes, bytearray)) else p.stdout))
+                                except Exception:
+                                    pass
+                                if p.returncode == 0 and os.path.isfile(out_tmp):
+                                    self.src = out_tmp
+                                else:
+                                    try:
+                                        for f in parts:
+                                            os.remove(f)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        shutil.rmtree(tmpdir)
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
+
+                # Ensure vParams is a string (fall back to default if None)
+                try:
+                    vParams = vParams or VIDEO_DEFAULT_PARAMS
+                except Exception:
+                    vParams = VIDEO_DEFAULT_PARAMS
+
                 cleaner = VidCleaner(
                     self.src,
                     self.subs,
@@ -1394,11 +1710,21 @@ class CleanVidGUI(QMainWindow):
 
         threads_override = None
         try:
-            if getattr(self, 'threads_spin', None):
-                threads_override = int(self.threads_spin.value())
+            ts = getattr(self, 'threads_spin', None)
+            if ts is not None:
+                try:
+                    threads_override = int(ts.value())
+                except Exception:
+                    threads_override = None
         except Exception:
             threads_override = None
-        self._encode_worker = self._EncodeWorker(src, subs_path, out, edited_clean_subs=edited_clean_subs, edited_mute_list=edited_mute_list, threadsEncoding=threads_override)
+        # Choose GPU encoder if available and include it in worker params
+        try:
+            vParams = VIDEO_DEFAULT_PARAMS
+            vParams = self._apply_gpu_encoder(vParams)
+        except Exception:
+            vParams = VIDEO_DEFAULT_PARAMS
+        self._encode_worker = self._EncodeWorker(src, subs_path, out, edited_clean_subs=edited_clean_subs, edited_mute_list=edited_mute_list, skip_ranges=edited_skip_ranges, vParams=vParams, threadsEncoding=threads_override)
         # Connect progress and finished handlers before moving worker to thread
         try:
             self._encode_worker.progress.connect(self._on_encode_progress)
@@ -1433,30 +1759,30 @@ class CleanVidGUI(QMainWindow):
             self.statusBar().addPermanentWidget(self._progress_bar)
         except Exception:
             self._progress_bar = None
-        except Exception:
-            self._progress_bar = None
 
         # Start worker thread
         self._encode_thread.start()
 
     def _on_encode_finished(self, success, message):
         try:
-            if getattr(self, '_spinner_widget', None):
+            spinner = getattr(self, '_spinner_widget', None)
+            if spinner is not None:
                 try:
-                    self._spinner_widget.stop()
+                    spinner.stop()
                 except Exception:
                     pass
                 try:
-                    self.statusBar().removeWidget(self._spinner_widget)
+                    self.statusBar().removeWidget(spinner)
                 except Exception:
                     pass
         except Exception:
             pass
 
         try:
-            if getattr(self, '_progress_bar', None):
+            pb = getattr(self, '_progress_bar', None)
+            if pb is not None:
                 try:
-                    self.statusBar().removeWidget(self._progress_bar)
+                    self.statusBar().removeWidget(pb)
                 except Exception:
                     pass
                 self._progress_bar = None
@@ -1468,9 +1794,10 @@ class CleanVidGUI(QMainWindow):
             QMessageBox.critical(self, "CleanVid Error", message)
         # Clean up temp exported subtitle file if present
         try:
-            if getattr(self, '_temp_subs_path', None):
+            tmp_sub = getattr(self, '_temp_subs_path', None)
+            if tmp_sub is not None:
                 try:
-                    os.remove(self._temp_subs_path)
+                    os.remove(tmp_sub)
                 except Exception:
                     pass
                 self._temp_subs_path = None
@@ -1479,7 +1806,8 @@ class CleanVidGUI(QMainWindow):
 
     def _on_encode_progress(self, payload):
         try:
-            if not getattr(self, '_progress_bar', None):
+            pb = getattr(self, '_progress_bar', None)
+            if pb is None:
                 return
             percent = payload.get('percent')
             out_time_ms = payload.get('out_time_ms', 0)
@@ -1488,7 +1816,7 @@ class CleanVidGUI(QMainWindow):
             if percent is not None:
                 try:
                     v = max(0, min(100, int(percent)))
-                    self._progress_bar.setValue(v)
+                    pb.setValue(v)
                     if eta is not None:
                         # Show percent + ETA
                         m, s = divmod(int(eta), 60)
@@ -1497,12 +1825,12 @@ class CleanVidGUI(QMainWindow):
                         else:
                             eta_str = f" ETA {s}s"
                         try:
-                            self._progress_bar.setFormat(f"{v}%{eta_str}")
+                            pb.setFormat(f"{v}%{eta_str}")
                         except Exception:
                             pass
                     else:
                         try:
-                            self._progress_bar.setFormat(f"{v}%")
+                            pb.setFormat(f"{v}%")
                         except Exception:
                             pass
                 except Exception:
@@ -1513,12 +1841,12 @@ class CleanVidGUI(QMainWindow):
                     out_s = int(out_time_ms) // 1000
                     if duration:
                         try:
-                            self._progress_bar.setFormat(f"{out_s}s/{int(duration)}s")
+                            pb.setFormat(f"{out_s}s/{int(duration)}s")
                         except Exception:
                             pass
                     else:
                         try:
-                            self._progress_bar.setFormat(f"{out_s}s")
+                            pb.setFormat(f"{out_s}s")
                         except Exception:
                             pass
                 except Exception:
